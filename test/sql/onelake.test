@@ -1,0 +1,23 @@
+# name: test/sql/onelake.test
+# description: test onelake extension
+# group: [sql]
+
+# Before we load the extension, this will fail
+statement error
+SELECT onelake('Sam');
+----
+Catalog Error: Scalar Function with name onelake does not exist!
+
+# Require statement will ensure this test is run with this extension loaded
+require onelake
+
+# Confirm the extension works
+query I
+SELECT onelake('Sam');
+----
+Onelake Sam 🐥
+
+query I
+SELECT onelake_openssl_version('Michael') ILIKE 'Onelake Michael, my linked OpenSSL version is OpenSSL%';
+----
+true
