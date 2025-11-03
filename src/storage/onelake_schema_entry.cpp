@@ -131,6 +131,10 @@ OneLakeSchemaEntry::LookupEntry(CatalogTransaction transaction, const EntryLooku
     return GetCatalogSet(lookup_info.GetCatalogType()).GetEntry(transaction.GetContext(), lookup_info.GetEntryName());
 }
 
+void OneLakeSchemaEntry::EnsureTablesLoaded(ClientContext &context) {
+    tables.EnsureLoaded(context);
+}
+
 OneLakeCatalogSet &OneLakeSchemaEntry::GetCatalogSet(CatalogType type) {
     switch (type) {
     case CatalogType::TABLE_ENTRY:

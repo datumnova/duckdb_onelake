@@ -1,5 +1,6 @@
 #pragma once
 #include "duckdb.hpp"
+#include <unordered_map>
 
 namespace duckdb {
 
@@ -7,11 +8,13 @@ struct OneLakeCredentials {
     string tenant_id;
     string client_id;
     string client_secret;
-    string access_token; // Cached token
-    timestamp_t token_expiry;
+    struct TokenCacheEntry {
+        string token;
+        timestamp_t expiry;
+    };
+    std::unordered_map<string, TokenCacheEntry> token_cache;
     
     bool IsValid() const;
-    bool IsTokenExpired() const;
 };
 
 } // namespace duckdb

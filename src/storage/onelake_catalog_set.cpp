@@ -11,7 +11,12 @@ OneLakeCatalogSet::OneLakeCatalogSet(Catalog &catalog) : catalog(catalog), is_lo
 optional_ptr<CatalogEntry> OneLakeCatalogSet::GetEntry(ClientContext &context, const string &name) {
     if (!is_loaded) {
         is_loaded = true;
-        LoadEntries(context);
+        try {
+            LoadEntries(context);
+        } catch (...) {
+            is_loaded = false;
+            throw;
+        }
     }
     lock_guard<mutex> l(entry_lock);
     auto entry = entries.find(name);
@@ -33,7 +38,12 @@ void OneLakeCatalogSet::EraseEntryInternal(const string &name) {
 void OneLakeCatalogSet::Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback) {
     if (!is_loaded) {
         is_loaded = true;
-        LoadEntries(context);
+        try {
+            LoadEntries(context);
+        } catch (...) {
+            is_loaded = false;
+            throw;
+        }
     }
     lock_guard<mutex> l(entry_lock);
     for (auto &entry : entries) {
@@ -54,6 +64,23 @@ optional_ptr<CatalogEntry> OneLakeCatalogSet::CreateEntry(unique_ptr<CatalogEntr
 void OneLakeCatalogSet::ClearEntries() {
     entries.clear();
     is_loaded = false;
+}
+
+void OneLakeCatalogSet::EnsureLoaded(ClientContext &context) {
+    if (is_loaded) {
+        return;
+    }
+    is_loaded = true;
+    try {
+        LoadEntries(context);
+    } catch (...) {
+        is_loaded = false;
+        throw;
+    }
+}
+
+bool OneLakeCatalogSet::IsLoaded() const {
+    return is_loaded;
 }
 
 OneLakeInSchemaSet::OneLakeInSchemaSet(OneLakeSchemaEntry &schema) : OneLakeCatalogSet(schema.ParentCatalog()), schema(schema) {

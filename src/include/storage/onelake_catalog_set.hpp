@@ -19,6 +19,8 @@ public:
     void Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback);
     virtual optional_ptr<CatalogEntry> CreateEntry(unique_ptr<CatalogEntry> entry);
     void ClearEntries();
+    void EnsureLoaded(ClientContext &context);
+    bool IsLoaded() const;
 
 protected:
     virtual void LoadEntries(ClientContext &context) = 0;

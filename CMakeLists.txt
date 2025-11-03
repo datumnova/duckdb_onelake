@@ -24,6 +24,7 @@ set(EXTENSION_SOURCES
     src/onelake_catalog.cpp
     src/storage/onelake_storage_extension.cpp
     src/storage/onelake_catalog_set.cpp
+  src/storage/onelake_http_util.cpp
     src/storage/onelake_schema_set.cpp
     src/storage/onelake_schema_entry.cpp
     src/storage/onelake_table_set.cpp

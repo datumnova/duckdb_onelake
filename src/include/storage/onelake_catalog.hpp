@@ -52,6 +52,7 @@ public:
 
     // Getters for OneLake-specific properties
     const string &GetWorkspaceId() const { return workspace_id; }
+    OneLakeCredentials &GetCredentials() { return credentials; }
     const OneLakeCredentials &GetCredentials() const { return credentials; }
     const string &GetConfiguredDefaultSchema() const { return default_schema; }
     bool HasDefaultSchema() const;

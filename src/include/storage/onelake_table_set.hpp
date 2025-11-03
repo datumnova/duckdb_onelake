@@ -26,6 +26,10 @@ protected:
     void AlterTable(ClientContext &context, RenameColumnInfo &info);
     void AlterTable(ClientContext &context, AddColumnInfo &info);
     void AlterTable(ClientContext &context, RemoveColumnInfo &info);
+
+private:
+    bool detail_endpoint_supported = true;
+    bool detail_endpoint_reported = false;
 };
 
 } // namespace duckdb

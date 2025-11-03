@@ -40,6 +40,7 @@ struct OneLakeTableInfo {
     string format;
     string location;
     vector<string> partition_columns;
+    bool has_metadata = false;
     unique_ptr<CreateTableInfo> create_info;
 };
 

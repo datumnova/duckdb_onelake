@@ -36,6 +36,7 @@ public:
     void DropEntry(ClientContext &context, DropInfo &info) override;
     optional_ptr<CatalogEntry> LookupEntry(CatalogTransaction transaction,
                                           const EntryLookupInfo &lookup_info) override;
+    void EnsureTablesLoaded(ClientContext &context);
 
 private:
     OneLakeCatalogSet &GetCatalogSet(CatalogType type);

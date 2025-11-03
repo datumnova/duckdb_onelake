@@ -6,6 +6,7 @@
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/printer.hpp"
 
 namespace duckdb {
 
@@ -31,7 +32,13 @@ void OneLakeSchemaSet::LoadEntries(ClientContext &context) {
         info.internal = IsInternalLakehouse(lakehouse.name);
         auto schema_entry = make_uniq<OneLakeSchemaEntry>(catalog, info);
         schema_entry->schema_data = make_uniq<OneLakeLakehouse>(lakehouse);
-        CreateEntry(std::move(schema_entry));
+        auto created_entry = CreateEntry(std::move(schema_entry));
+        if (created_entry) {
+            auto &schema_ref = created_entry->Cast<OneLakeSchemaEntry>();
+            schema_ref.EnsureTablesLoaded(context);
+            Printer::Print(StringUtil::Format("[onelake] registered lakehouse '%s' (id=%s)", lakehouse.name,
+                                              lakehouse.id.empty() ? "<unknown>" : lakehouse.id));
+        }
 
         available_lakehouses.push_back(lakehouse.name);
 
