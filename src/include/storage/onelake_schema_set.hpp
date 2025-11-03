@@ -10,9 +10,6 @@ public:
     
 protected:
     void LoadEntries(ClientContext &context) override;
-    
-private:
-    optional_ptr<CatalogEntry> CreateSchema(ClientContext &context, CreateSchemaInfo &info);
 };
 
 } // namespace duckdb

@@ -17,6 +17,9 @@ public:
     unique_ptr<OneLakeTableInfo> GetTableInfo(ClientContext &context, const string &table_name);
     optional_ptr<CatalogEntry> RefreshTable(ClientContext &context, const string &table_name);
 
+    void EnsureFresh(ClientContext &context);
+    void MarkRefreshRequired();
+
     void AlterTable(ClientContext &context, AlterTableInfo &info);
 
 protected:
@@ -30,6 +33,8 @@ protected:
 private:
     bool detail_endpoint_supported = true;
     bool detail_endpoint_reported = false;
+    transaction_t last_refresh_query_id = MAXIMUM_QUERY_ID;
+    bool refresh_forced = true;
 };
 
 } // namespace duckdb

@@ -9,9 +9,6 @@ public:
     std::string Name() override;
     std::string Version() const override;
 
-private:
-    void RegisterFunctions();
-    void RegisterTypes();
 };
 
 } // namespace duckdb

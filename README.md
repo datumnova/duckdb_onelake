@@ -4,7 +4,9 @@ This repository is based on https://github.com/duckdb/extension-template, check 
 
 ---
 
-This extension, Onelake, allow you to ... <extension_goal>.
+This extension, Onelake, allow you to connect DuckDB to OneLake workspaces and lakehouses, enabling you to query data stored in OneLake directly from DuckDB.
+
+DISCLAIMER: Currently, this extension is in an experimental phase and only supports reading Delta Lake tables in lakehouses created without schema.
 
 
 ## Building
@@ -33,54 +35,72 @@ The main binaries that will be built are:
 - `onelake.duckdb_extension` is the loadable binary as it would be distributed.
 
 ## Running the extension
+
+# Prerequisites
+To use the Onelake extension, you need to have access to a OneLake workspace and lakehouse. You will also need to have the necessary credentials for a service principal (tenant ID, client ID, and client secret) to authenticate with Azure, this extension was tested using a Workspace identity. Please follow the steps documented here : https://learn.microsoft.com/en-us/fabric/security/workspace-identity.
+
 To run the extension code, simply start the shell with `./build/release/duckdb`.
 
-Now we can use the features from the extension directly in DuckDB. The template contains a single scalar function `onelake()` that takes a string arguments and returns a string:
-```
-D select onelake('Jane') as result;
-┌───────────────┐
-│    result     │
-│    varchar    │
-├───────────────┤
-│ Onelake Jane 🐥 │
-└───────────────┘
-```
-
-## Running the tests
-Different tests can be created for DuckDB extensions. The primary way of testing DuckDB extensions should be the SQL tests in `./test/sql`. These SQL tests can be run using:
+Now we can use the features from the extension directly in DuckDB. For example, to load the extension, run:
+Before starting the shell, export the following environment variable to point to your CA certificates file:
 ```sh
-make test
+export CURL_CA_PATH=/etc/ssl/certs
+# This path may vary based on your operating system and installation but is necessary for successful connections through the delta extension when attempting to validate tokens.
 ```
-
-### Installing the deployed binaries
-To install your extension binaries from S3, you will need to do two things. Firstly, DuckDB should be launched with the
-`allow_unsigned_extensions` option set to true. How to set this will depend on the client you're using. Some examples:
-
-CLI:
-```shell
-duckdb -unsigned
+Then start the DuckDB shell:
+```sh
+./build/release/duckdb --unsigned
 ```
-
-Python:
-```python
-con = duckdb.connect(':memory:', config={'allow_unsigned_extensions' : 'true'})
-```
-
-NodeJS:
-```js
-db = new duckdb.Database(':memory:', {"allow_unsigned_extensions": "true"});
-```
-
-Secondly, you will need to set the repository endpoint in DuckDB to the HTTP url of your bucket + version of the extension
-you want to install. To do this run the following SQL query in DuckDB:
+Then, in the DuckDB shell, run:
 ```sql
-SET custom_extension_repository='bucket.s3.eu-west-1.amazonaws.com/<your_extension_name>/latest';
-```
-Note that the `/latest` path will allow you to install the latest extension version available for your current version of
-DuckDB. To specify a specific version, you can pass the version instead.
+LOAD './extension/onelake/onelake.duckdb_extension';
+set azure_transport_option_type = 'curl';
+CREATE SECRET  (
+    TYPE azure,
+    PROVIDER service_principal,
+    TENANT_ID '<your_tenant_id>',
+    CLIENT_ID '<your_client_id>',
+    CLIENT_SECRET '<your_client_secret>'
+);
 
-After running these steps, you can install and load your extension using the regular INSTALL/LOAD commands in DuckDB:
-```sql
-INSTALL onelake
-LOAD onelake
+CREATE SECRET onelake (
+    TYPE ONELAKE,
+    TENANT_ID '<your_tenant_id>',
+    CLIENT_ID '<your_client_id>',
+    CLIENT_SECRET '<your_client_secret>'
+);
+
+ATTACH 'onelake://<your_workspace_id>'
+      AS <your_connection_name>
+      (TYPE ONELAKE, DEFAULT_LAKEHOUSE '<your_lakehouse_id_or_name>');
+
+USE <your_connection_name>;
+
+SELECT * FROM <your_table_name> LIMIT 10;
+SELECT * FROM <second_lakehouse>.<your_table_name> LIMIT 10;
 ```
+
+Optionally, you can replace the secret creation and authentication steps by setting the following environment variables before starting the DuckDB shell:
+
+```sh
+export ONELAKE_TENANT_ID='<your_tenant_id>'
+export ONELAKE_CLIENT_ID='<your_client_id>'
+export ONELAKE_CLIENT_SECRET='<your_client_secret>'
+```
+And then in the DuckDB shell, you can replace the `CREATE SECRET` statements with:
+```sql
+CREATE SECRET onelake (
+    TYPE ONELAKE,
+    TENANT_ID '${ONELAKE_TENANT_ID}',
+    CLIENT_ID '${ONELAKE_CLIENT_ID}',
+    CLIENT_SECRET '${ONELAKE_CLIENT_SECRET}'
+);
+CREATE SECRET  (
+    TYPE azure,
+    PROVIDER service_principal,
+    TENANT_ID '${ONELAKE_TENANT_ID}',
+    CLIENT_ID '${ONELAKE_CLIENT_ID}',
+    CLIENT_SECRET '${ONELAKE_CLIENT_SECRET}'
+);
+```
+

@@ -31,7 +31,6 @@ private:
 private:
     mutable std::mutex bind_lock;
     vector<string> partition_columns;
-    bool schema_initialized = false;
     string resolved_path;
 };
 

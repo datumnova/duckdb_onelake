@@ -199,9 +199,6 @@ string OneLakeAPI::MakeAPIRequest(ClientContext &context, const string &url, One
                                   bool allow_not_found) {
     (void)context;
     
-    // Log the API call being made
-    printf("[OneLakeAPI] Making request to: %s\n", url.c_str());
-    
     string access_token = GetAccessToken(credentials, OneLakeTokenAudience::Fabric);
     
     CURL *curl;
@@ -228,9 +225,6 @@ string OneLakeAPI::MakeAPIRequest(ClientContext &context, const string &url, One
     
     long response_code;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
-    
-    // Log the response code
-    printf("[OneLakeAPI] Response code: %ld\n", response_code);
     
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);

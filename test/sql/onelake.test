@@ -2,22 +2,29 @@
 # description: test onelake extension
 # group: [sql]
 
-# Before we load the extension, this will fail
-statement error
-SELECT onelake('Sam');
-----
-Catalog Error: Scalar Function with name onelake does not exist!
+LOAD './extension/onelake/onelake.duckdb_extension';
+set azure_transport_option_type = 'curl';
+CREATE SECRET  (
+    TYPE azure,
+    PROVIDER service_principal,
+    TENANT_ID '${AZURE_TENANT_ID}',
+    CLIENT_ID '${AZURE_CLIENT_ID}',
+    CLIENT_SECRET '${AZURE_CLIENT_SECRET}'
+);
 
-# Require statement will ensure this test is run with this extension loaded
-require onelake
+CREATE SECRET onelake (
+    TYPE ONELAKE,
+    TENANT_ID '${AZURE_TENANT_ID}',
+    CLIENT_ID '${AZURE_CLIENT_ID}',
+    CLIENT_SECRET '${AZURE_CLIENT_SECRET}'
+);
 
-# Confirm the extension works
-query I
-SELECT onelake('Sam');
-----
-Onelake Sam 🐥
+ATTACH 'onelake://${AZURE_WORKSPACE_ID}'
+      AS <your_connection_name>
+      (TYPE ONELAKE, DEFAULT_LAKEHOUSE '<your_lakehouse_id_or_name>');
 
-query I
-SELECT onelake_openssl_version('Michael') ILIKE 'Onelake Michael, my linked OpenSSL version is OpenSSL%';
-----
-true
+USE <your_connection_name>;
+
+SELECT * FROM <your_table_name> LIMIT 10;
+SELECT * FROM <second_lakehouse>.<your_table_name> LIMIT 10;
+

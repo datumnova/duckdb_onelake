@@ -9,6 +9,7 @@
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/parser/parsed_data/alter_info.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
+#include "duckdb/main/client_context.hpp"
 
 namespace duckdb {
 
@@ -19,12 +20,6 @@ OneLakeSchemaEntry::OneLakeSchemaEntry(Catalog &catalog, CreateSchemaInfo &info)
 OneLakeSchemaEntry::~OneLakeSchemaEntry() {
 }
 
-OneLakeTransaction &GetOneLakeTransaction(CatalogTransaction transaction) {
-    if (!transaction.transaction) {
-        throw InternalException("No transaction!?");
-    }
-    return transaction.transaction->Cast<OneLakeTransaction>();
-}
 
 optional_ptr<CatalogEntry> OneLakeSchemaEntry::CreateTable(CatalogTransaction transaction, BoundCreateTableInfo &info) {
     auto &base_info = info.Base();
@@ -112,6 +107,9 @@ void OneLakeSchemaEntry::Scan(ClientContext &context, CatalogType type,
     if (!CatalogTypeIsSupported(type)) {
         return;
     }
+    if (type == CatalogType::TABLE_ENTRY) {
+        tables.EnsureFresh(context);
+    }
     GetCatalogSet(type).Scan(context, callback);
 }
 
@@ -128,7 +126,16 @@ OneLakeSchemaEntry::LookupEntry(CatalogTransaction transaction, const EntryLooku
     if (!CatalogTypeIsSupported(lookup_info.GetCatalogType())) {
         return nullptr;
     }
-    return GetCatalogSet(lookup_info.GetCatalogType()).GetEntry(transaction.GetContext(), lookup_info.GetEntryName());
+    auto &catalog_set = GetCatalogSet(lookup_info.GetCatalogType());
+    auto result = catalog_set.GetEntry(transaction.GetContext(), lookup_info.GetEntryName());
+    if (result || lookup_info.GetCatalogType() != CatalogType::TABLE_ENTRY || !transaction.HasContext()) {
+        return result;
+    }
+
+    auto &context = transaction.GetContext();
+    tables.MarkRefreshRequired();
+    tables.EnsureFresh(context);
+    return catalog_set.GetEntry(context, lookup_info.GetEntryName());
 }
 
 void OneLakeSchemaEntry::EnsureTablesLoaded(ClientContext &context) {

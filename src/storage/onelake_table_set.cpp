@@ -17,7 +17,9 @@
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
+#include "duckdb/common/constants.hpp"
 #include "storage/onelake_schema_entry.hpp"
+#include "duckdb/main/client_context.hpp"
 #include <unordered_set>
 
 namespace {
@@ -58,12 +60,7 @@ vector<string> BuildTableRootCandidates(const OneLakeCatalog &catalog, const One
         const auto &lakehouse_id = schema_entry.schema_data->id;
         const auto &lakehouse_name = schema_entry.schema_data->name;
         if (!lakehouse_id.empty()) {
-            add_candidate(base_prefix + "/" + lakehouse_id + ".Lakehouse/Tables");
             add_candidate(base_prefix + "/" + lakehouse_id + "/Tables");
-        }
-        if (!lakehouse_name.empty()) {
-            add_candidate(base_prefix + "/" + lakehouse_name + ".Lakehouse/Tables");
-            add_candidate(base_prefix + "/" + lakehouse_name + "/Tables");
         }
     }
 
@@ -239,6 +236,25 @@ optional_ptr<CatalogEntry> OneLakeTableSet::RefreshTable(ClientContext &context,
     auto table_ptr = table_entry.get();
     CreateEntry(std::move(table_entry));
     return table_ptr;
+}
+
+void OneLakeTableSet::EnsureFresh(ClientContext &context) {
+    transaction_t active_query_id = MAXIMUM_QUERY_ID;
+    if (context.transaction.HasActiveTransaction()) {
+        active_query_id = context.transaction.GetActiveQuery();
+    }
+
+    bool reload = refresh_forced || !IsLoaded() || last_refresh_query_id != active_query_id;
+    if (reload) {
+        ClearEntries();
+        refresh_forced = false;
+        last_refresh_query_id = active_query_id;
+    }
+    EnsureLoaded(context);
+}
+
+void OneLakeTableSet::MarkRefreshRequired() {
+    refresh_forced = true;
 }
 
 unique_ptr<OneLakeTableInfo> OneLakeTableSet::GetTableInfo(ClientContext &context, const string &table_name) {

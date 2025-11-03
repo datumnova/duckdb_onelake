@@ -34,8 +34,6 @@ void OneLakeSchemaSet::LoadEntries(ClientContext &context) {
         schema_entry->schema_data = make_uniq<OneLakeLakehouse>(lakehouse);
         auto created_entry = CreateEntry(std::move(schema_entry));
         if (created_entry) {
-            auto &schema_ref = created_entry->Cast<OneLakeSchemaEntry>();
-            schema_ref.EnsureTablesLoaded(context);
             Printer::Print(StringUtil::Format("[onelake] registered lakehouse '%s' (id=%s)", lakehouse.name,
                                               lakehouse.id.empty() ? "<unknown>" : lakehouse.id));
         }

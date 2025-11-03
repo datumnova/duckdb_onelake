@@ -313,7 +313,6 @@ TableFunction OneLakeTableEntry::GetScanFunction(ClientContext &context, unique_
             auto delta_bind = BindDeltaFunction(context, delta_function, candidate, return_types, return_names);
             UpdateColumnDefinitions(return_names, return_types);
             resolved_path = candidate;
-            schema_initialized = true;
             bind_data = std::move(delta_bind);
             return delta_function;
         } catch (const Exception &ex) {
