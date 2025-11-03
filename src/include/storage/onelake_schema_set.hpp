@@ -6,10 +6,10 @@ namespace duckdb {
 
 class OneLakeSchemaSet : public OneLakeCatalogSet {
 public:
-    OneLakeSchemaSet(Catalog &catalog);
-    
+	OneLakeSchemaSet(Catalog &catalog);
+
 protected:
-    void LoadEntries(ClientContext &context) override;
+	void LoadEntries(ClientContext &context) override;
 };
 
 } // namespace duckdb

@@ -9,19 +9,19 @@ class OneLakeCatalog;
 
 class OneLakeTransactionManager : public TransactionManager {
 public:
-    OneLakeTransactionManager(AttachedDatabase &db, OneLakeCatalog &catalog);
-    ~OneLakeTransactionManager() override;
+	OneLakeTransactionManager(AttachedDatabase &db, OneLakeCatalog &catalog);
+	~OneLakeTransactionManager() override;
 
-    Transaction &StartTransaction(ClientContext &context) override;
-    ErrorData CommitTransaction(ClientContext &context, Transaction &transaction) override;
-    void RollbackTransaction(Transaction &transaction) override;
+	Transaction &StartTransaction(ClientContext &context) override;
+	ErrorData CommitTransaction(ClientContext &context, Transaction &transaction) override;
+	void RollbackTransaction(Transaction &transaction) override;
 
-    void Checkpoint(ClientContext &context, bool force = false) override;
+	void Checkpoint(ClientContext &context, bool force = false) override;
 
 private:
-    OneLakeCatalog &onelake_catalog;
-    mutex transaction_lock;
-    unordered_map<Transaction *, unique_ptr<OneLakeTransaction>> transactions;
+	OneLakeCatalog &onelake_catalog;
+	mutex transaction_lock;
+	unordered_map<Transaction *, unique_ptr<OneLakeTransaction>> transactions;
 };
 
 } // namespace duckdb

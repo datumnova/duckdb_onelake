@@ -11,38 +11,38 @@ class OneLakeTransaction;
 
 class OneLakeCatalogSet {
 public:
-    OneLakeCatalogSet(Catalog &catalog);
-    virtual ~OneLakeCatalogSet() = default;
+	OneLakeCatalogSet(Catalog &catalog);
+	virtual ~OneLakeCatalogSet() = default;
 
-    optional_ptr<CatalogEntry> GetEntry(ClientContext &context, const string &name);
-    virtual void DropEntry(ClientContext &context, DropInfo &info);
-    void Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback);
-    virtual optional_ptr<CatalogEntry> CreateEntry(unique_ptr<CatalogEntry> entry);
-    void ClearEntries();
-    void EnsureLoaded(ClientContext &context);
-    bool IsLoaded() const;
-
-protected:
-    virtual void LoadEntries(ClientContext &context) = 0;
-    void EraseEntryInternal(const string &name);
+	optional_ptr<CatalogEntry> GetEntry(ClientContext &context, const string &name);
+	virtual void DropEntry(ClientContext &context, DropInfo &info);
+	void Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback);
+	virtual optional_ptr<CatalogEntry> CreateEntry(unique_ptr<CatalogEntry> entry);
+	void ClearEntries();
+	void EnsureLoaded(ClientContext &context);
+	bool IsLoaded() const;
 
 protected:
-    Catalog &catalog;
+	virtual void LoadEntries(ClientContext &context) = 0;
+	void EraseEntryInternal(const string &name);
+
+protected:
+	Catalog &catalog;
 
 private:
-    mutex entry_lock;
-    case_insensitive_map_t<unique_ptr<CatalogEntry>> entries;
-    bool is_loaded;
+	mutex entry_lock;
+	case_insensitive_map_t<unique_ptr<CatalogEntry>> entries;
+	bool is_loaded;
 };
 
 class OneLakeInSchemaSet : public OneLakeCatalogSet {
 public:
-    OneLakeInSchemaSet(OneLakeSchemaEntry &schema);
+	OneLakeInSchemaSet(OneLakeSchemaEntry &schema);
 
-    optional_ptr<CatalogEntry> CreateEntry(unique_ptr<CatalogEntry> entry) override;
+	optional_ptr<CatalogEntry> CreateEntry(unique_ptr<CatalogEntry> entry) override;
 
 protected:
-    OneLakeSchemaEntry &schema;
+	OneLakeSchemaEntry &schema;
 };
 
 } // namespace duckdb

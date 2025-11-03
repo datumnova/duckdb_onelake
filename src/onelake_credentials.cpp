@@ -4,7 +4,7 @@
 namespace duckdb {
 
 bool OneLakeCredentials::IsValid() const {
-    return !tenant_id.empty() && !client_id.empty() && !client_secret.empty();
+	return !tenant_id.empty() && !client_id.empty() && !client_secret.empty();
 }
 
 } // namespace duckdb

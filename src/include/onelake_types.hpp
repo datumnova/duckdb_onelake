@@ -6,42 +6,42 @@
 namespace duckdb {
 
 struct OneLakeLakehouse {
-    string id;
-    string name;
-    string display_name;
-    string description;
+	string id;
+	string name;
+	string display_name;
+	string description;
 };
 
 struct OneLakeTable {
-    string name;
-    string type; // "Table" or "View"
-    string format; // "Delta", "Parquet", etc.
-    string location;
+	string name;
+	string type;   // "Table" or "View"
+	string format; // "Delta", "Parquet", etc.
+	string location;
 };
 
 struct OneLakeTableInfo {
-    OneLakeTableInfo() {
-        create_info = make_uniq<CreateTableInfo>();
-    }
+	OneLakeTableInfo() {
+		create_info = make_uniq<CreateTableInfo>();
+	}
 
-    OneLakeTableInfo(const string &schema_name, const string &table_name) {
-        create_info = make_uniq<CreateTableInfo>(string(), schema_name, table_name);
-    }
+	OneLakeTableInfo(const string &schema_name, const string &table_name) {
+		create_info = make_uniq<CreateTableInfo>(string(), schema_name, table_name);
+	}
 
-    OneLakeTableInfo(const SchemaCatalogEntry &schema, const string &table_name) {
-        create_info = make_uniq<CreateTableInfo>((SchemaCatalogEntry &)schema, table_name);
-    }
+	OneLakeTableInfo(const SchemaCatalogEntry &schema, const string &table_name) {
+		create_info = make_uniq<CreateTableInfo>((SchemaCatalogEntry &)schema, table_name);
+	}
 
-    const string &GetTableName() const {
-        return create_info->table;
-    }
+	const string &GetTableName() const {
+		return create_info->table;
+	}
 
-    string name;
-    string format;
-    string location;
-    vector<string> partition_columns;
-    bool has_metadata = false;
-    unique_ptr<CreateTableInfo> create_info;
+	string name;
+	string format;
+	string location;
+	vector<string> partition_columns;
+	bool has_metadata = false;
+	unique_ptr<CreateTableInfo> create_info;
 };
 
 } // namespace duckdb

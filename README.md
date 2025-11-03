@@ -76,6 +76,8 @@ ATTACH 'onelake://<your_workspace_id>'
 
 USE <your_connection_name>;
 
+SHOW TABLES;
+
 SELECT * FROM <your_table_name> LIMIT 10;
 SELECT * FROM <second_lakehouse>.<your_table_name> LIMIT 10;
 ```

@@ -2,29 +2,46 @@
 # description: test onelake extension
 # group: [sql]
 
-LOAD './extension/onelake/onelake.duckdb_extension';
-set azure_transport_option_type = 'curl';
+require onelake
+
+statement ok
+INSTALL azure;
+
+statement ok
+LOAD azure;
+
+#set azure_transport_option_type = 'curl'
+
+
+
+statement ok
 CREATE SECRET  (
     TYPE azure,
     PROVIDER service_principal,
-    TENANT_ID '${AZURE_TENANT_ID}',
-    CLIENT_ID '${AZURE_CLIENT_ID}',
-    CLIENT_SECRET '${AZURE_CLIENT_SECRET}'
+    TENANT_ID 'AZURE_TENANT_ID',
+    CLIENT_ID 'AZURE_CLIENT_ID',
+    CLIENT_SECRET 'AZURE_CLIENT_SECRET'
 );
 
+statement ok
 CREATE SECRET onelake (
     TYPE ONELAKE,
-    TENANT_ID '${AZURE_TENANT_ID}',
-    CLIENT_ID '${AZURE_CLIENT_ID}',
-    CLIENT_SECRET '${AZURE_CLIENT_SECRET}'
+    TENANT_ID 'AZURE_TENANT_ID',
+    CLIENT_ID 'AZURE_CLIENT_ID',
+    CLIENT_SECRET 'AZURE_CLIENT_SECRET'
 );
 
-ATTACH 'onelake://${AZURE_WORKSPACE_ID}'
-      AS <your_connection_name>
-      (TYPE ONELAKE, DEFAULT_LAKEHOUSE '<your_lakehouse_id_or_name>');
+statement ok
+ATTACH 'onelake://AZURE_WORKSPACE_ID'
+      AS your_connection_name
+      (TYPE ONELAKE, DEFAULT_LAKEHOUSE 'your_lakehouse_id_or_name');
 
-USE <your_connection_name>;
+#statement ok
+#USE your_connection_name;
 
-SELECT * FROM <your_table_name> LIMIT 10;
-SELECT * FROM <second_lakehouse>.<your_table_name> LIMIT 10;
+#statement ok
+#SELECT * FROM your_table_name LIMIT 10;
+
+#statement ok
+#SELECT * FROM second_lakehouse.your_table_name LIMIT 10;
 

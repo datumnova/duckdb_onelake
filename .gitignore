@@ -7,3 +7,7 @@ testext
 test/python/__pycache__/
 .Rhistory
 .vscode/settings.json
+
+# Ignore Python files
+.venv/
+__pycache__/

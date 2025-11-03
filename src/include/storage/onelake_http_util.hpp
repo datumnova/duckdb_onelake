@@ -7,7 +7,6 @@ namespace duckdb {
 class OneLakeCatalog;
 class OneLakeSchemaEntry;
 
-void EnsureHttpBearerSecret(ClientContext &context, OneLakeCatalog &catalog,
-                            const OneLakeSchemaEntry *schema_entry);
+void EnsureHttpBearerSecret(ClientContext &context, OneLakeCatalog &catalog, const OneLakeSchemaEntry *schema_entry);
 
 } // namespace duckdb
