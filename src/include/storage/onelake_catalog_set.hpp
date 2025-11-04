@@ -11,7 +11,7 @@ class OneLakeTransaction;
 
 class OneLakeCatalogSet {
 public:
-	OneLakeCatalogSet(Catalog &catalog);
+    explicit OneLakeCatalogSet(Catalog &catalog);
 	virtual ~OneLakeCatalogSet() = default;
 
 	optional_ptr<CatalogEntry> GetEntry(ClientContext &context, const string &name);
@@ -37,7 +37,7 @@ private:
 
 class OneLakeInSchemaSet : public OneLakeCatalogSet {
 public:
-	OneLakeInSchemaSet(OneLakeSchemaEntry &schema);
+	explicit OneLakeInSchemaSet(OneLakeSchemaEntry &schema);
 
 	optional_ptr<CatalogEntry> CreateEntry(unique_ptr<CatalogEntry> entry) override;
 

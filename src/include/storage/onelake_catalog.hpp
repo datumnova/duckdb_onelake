@@ -13,7 +13,7 @@ class OneLakeCatalog : public Catalog {
 public:
 	explicit OneLakeCatalog(AttachedDatabase &db_p, const string &workspace_id, const string &catalog_name,
 	                        OneLakeCredentials credentials, string default_schema = string());
-	~OneLakeCatalog();
+	~OneLakeCatalog() override;
 
 	string workspace_id;
 	AccessMode access_mode;

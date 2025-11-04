@@ -1,6 +1,7 @@
 #pragma once
 #include "storage/onelake_catalog_set.hpp"
 #include "storage/onelake_table_entry.hpp"
+#include <unordered_set>
 
 namespace duckdb {
 
@@ -16,6 +17,7 @@ public:
 
 	unique_ptr<OneLakeTableInfo> GetTableInfo(ClientContext &context, const string &table_name);
 	optional_ptr<CatalogEntry> RefreshTable(ClientContext &context, const string &table_name);
+	bool ShouldRefreshForMissingTable(ClientContext &context, const string &table_name);
 
 	void EnsureFresh(ClientContext &context);
 	void MarkRefreshRequired();
@@ -35,6 +37,9 @@ private:
 	bool detail_endpoint_reported = false;
 	transaction_t last_refresh_query_id = MAXIMUM_QUERY_ID;
 	bool refresh_forced = true;
+	std::unordered_set<string> missing_tables;
+	transaction_t missing_tables_query_id = MAXIMUM_QUERY_ID;
+	mutex missing_tables_lock;
 };
 
 } // namespace duckdb

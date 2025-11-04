@@ -135,6 +135,9 @@ optional_ptr<CatalogEntry> OneLakeSchemaEntry::LookupEntry(CatalogTransaction tr
 	}
 
 	auto &context = transaction.GetContext();
+	if (!tables.ShouldRefreshForMissingTable(context, lookup_info.GetEntryName())) {
+		return nullptr;
+	}
 	tables.MarkRefreshRequired();
 	tables.EnsureFresh(context);
 	return catalog_set.GetEntry(context, lookup_info.GetEntryName());

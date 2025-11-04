@@ -11,3 +11,4 @@ test/python/__pycache__/
 # Ignore Python files
 .venv/
 __pycache__/
+vcpkg_installed/

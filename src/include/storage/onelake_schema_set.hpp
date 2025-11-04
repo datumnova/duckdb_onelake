@@ -6,7 +6,7 @@ namespace duckdb {
 
 class OneLakeSchemaSet : public OneLakeCatalogSet {
 public:
-	OneLakeSchemaSet(Catalog &catalog);
+	explicit OneLakeSchemaSet(Catalog &catalog);
 
 protected:
 	void LoadEntries(ClientContext &context) override;

@@ -3,6 +3,17 @@ cmake_minimum_required(VERSION 3.5)
 # Set extension name here
 set(TARGET_NAME onelake)
 
+set(CURL_LIBRARY "-lcurl")
+set(CURL_INCLUDE_DIR "/usr/include/curl")
+
+# Hint CMake to the bundled vcpkg installation when the toolchain isn't providing jsoncpp.
+if(NOT DEFINED jsoncpp_DIR)
+  set(_jsoncpp_guess "${CMAKE_CURRENT_LIST_DIR}/vcpkg_installed/x64-linux/share/jsoncpp")
+  if(EXISTS "${_jsoncpp_guess}/jsoncppConfig.cmake")
+    set(jsoncpp_DIR "${_jsoncpp_guess}" CACHE PATH "JsonCpp config directory")
+  endif()
+endif()
+
 # DuckDB's extension distribution supports vcpkg. As such, dependencies can be added in ./vcpkg.json and then
 # used in cmake with find_package. Feel free to remove or replace with other dependencies.
 # Note that it should also be removed from vcpkg.json to prevent needlessly installing it..
