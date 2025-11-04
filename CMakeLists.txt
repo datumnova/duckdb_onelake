@@ -6,12 +6,23 @@ set(TARGET_NAME onelake)
 set(CURL_LIBRARY "-lcurl")
 set(CURL_INCLUDE_DIR "/usr/include/curl")
 
-# Hint CMake to the bundled vcpkg installation when the toolchain isn't providing jsoncpp.
+# Hint CMake to common vcpkg install locations when the toolchain hasn't populated jsoncpp yet.
 if(NOT DEFINED jsoncpp_DIR)
-  set(_jsoncpp_guess "${CMAKE_CURRENT_LIST_DIR}/vcpkg_installed/x64-linux/share/jsoncpp")
-  if(EXISTS "${_jsoncpp_guess}/jsoncppConfig.cmake")
-    set(jsoncpp_DIR "${_jsoncpp_guess}" CACHE PATH "JsonCpp config directory")
+  set(_jsoncpp_candidates)
+  if(DEFINED VCPKG_TARGET_TRIPLET)
+    list(APPEND _jsoncpp_candidates
+         "${CMAKE_CURRENT_LIST_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/share/jsoncpp"
+         "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/share/jsoncpp")
   endif()
+  list(APPEND _jsoncpp_candidates
+       "${CMAKE_CURRENT_LIST_DIR}/vcpkg_installed/x64-linux/share/jsoncpp"
+       "${CMAKE_BINARY_DIR}/vcpkg_installed/x64-linux/share/jsoncpp")
+  foreach(_jsoncpp_guess IN LISTS _jsoncpp_candidates)
+    if(EXISTS "${_jsoncpp_guess}/jsoncppConfig.cmake")
+      set(jsoncpp_DIR "${_jsoncpp_guess}" CACHE PATH "JsonCpp config directory")
+      break()
+    endif()
+  endforeach()
 endif()
 
 project(${TARGET_NAME})
