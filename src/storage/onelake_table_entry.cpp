@@ -160,7 +160,7 @@ vector<string> BuildLocationCandidates(const OneLakeCatalog &catalog, const OneL
 	}
 
 	auto relative_paths = BuildRelativePaths(normalized, table_entry.name);
-	const string& workspace_id = catalog.GetWorkspaceId();
+	const string &workspace_id = catalog.GetWorkspaceId();
 	vector<string> prefixes;
 	std::unordered_set<string> prefix_seen;
 	auto add_prefix = [&](const string &value) {

@@ -24,22 +24,22 @@
 
 namespace {
 
-using duckdb::string;
-using duckdb::vector;
-using duckdb::idx_t;
-using duckdb::CreateTableInfo;
-using duckdb::OneLakeTableEntry;
-using duckdb::ExtensionHelper;
-using duckdb::EnsureHttpBearerSecret;
-using duckdb::OneLakeAPI;
-using duckdb::Printer;
-using duckdb::StringUtil;
-using duckdb::Exception;
 using duckdb::ClientContext;
+using duckdb::CreateTableInfo;
+using duckdb::EnsureHttpBearerSecret;
+using duckdb::Exception;
+using duckdb::ExtensionHelper;
+using duckdb::idx_t;
+using duckdb::make_uniq;
+using duckdb::OneLakeAPI;
 using duckdb::OneLakeCatalog;
 using duckdb::OneLakeSchemaEntry;
+using duckdb::OneLakeTableEntry;
 using duckdb::OneLakeTableSet;
-using duckdb::make_uniq;
+using duckdb::Printer;
+using duckdb::string;
+using duckdb::StringUtil;
+using duckdb::vector;
 using std::unordered_set;
 
 string EnsureTrailingSlash(const string &path) {
@@ -55,7 +55,7 @@ string EnsureTrailingSlash(const string &path) {
 vector<string> BuildTableRootCandidates(const OneLakeCatalog &catalog, const OneLakeSchemaEntry &schema_entry) {
 	vector<string> result;
 	unordered_set<string> seen;
-	const string& workspace_id = catalog.GetWorkspaceId();
+	const string &workspace_id = catalog.GetWorkspaceId();
 	string base_prefix = "abfss://" + workspace_id + "@onelake.dfs.fabric.microsoft.com";
 	auto add_candidate = [&](const string &candidate) {
 		if (candidate.empty()) {
@@ -237,10 +237,10 @@ void OneLakeTableSet::LoadEntries(ClientContext &context) {
 		    "exist under the 'Tables/' directory.",
 		    lakehouse_name));
 	} else {
-		Printer::Print(StringUtil::Format(
-		    "[onelake] registered %llu tables for lakehouse '%s' (api=%llu, storage=%llu)",
-		    static_cast<uint64_t>(api_count + storage_count), lakehouse_name,
-		    static_cast<uint64_t>(api_count), static_cast<uint64_t>(storage_count)));
+		Printer::Print(
+		    StringUtil::Format("[onelake] registered %llu tables for lakehouse '%s' (api=%llu, storage=%llu)",
+		                       static_cast<uint64_t>(api_count + storage_count), lakehouse_name,
+		                       static_cast<uint64_t>(api_count), static_cast<uint64_t>(storage_count)));
 	}
 }
 
@@ -278,8 +278,7 @@ void OneLakeTableSet::EnsureFresh(ClientContext &context) {
 	// its result. By ignoring the sentinel value we refresh exactly once per real query id.
 	bool query_id_mismatch = false;
 	if (active_query_id != MAXIMUM_QUERY_ID) {
-		query_id_mismatch = (last_refresh_query_id == MAXIMUM_QUERY_ID) ||
-		                    (last_refresh_query_id != active_query_id);
+		query_id_mismatch = (last_refresh_query_id == MAXIMUM_QUERY_ID) || (last_refresh_query_id != active_query_id);
 	}
 
 	bool reload = refresh_forced || !IsLoaded() || query_id_mismatch;

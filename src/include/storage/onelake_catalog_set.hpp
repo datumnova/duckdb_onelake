@@ -11,7 +11,7 @@ class OneLakeTransaction;
 
 class OneLakeCatalogSet {
 public:
-    explicit OneLakeCatalogSet(Catalog &catalog);
+	explicit OneLakeCatalogSet(Catalog &catalog);
 	virtual ~OneLakeCatalogSet() = default;
 
 	optional_ptr<CatalogEntry> GetEntry(ClientContext &context, const string &name);
