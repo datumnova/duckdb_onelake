@@ -8,31 +8,15 @@ This extension, Onelake, allow you to connect DuckDB to OneLake workspaces and l
 
 DISCLAIMER: Currently, this extension is in an experimental phase and only supports reading Delta Lake tables in lakehouses created without schema.
 
-
-## Building
-### Managing dependencies
-DuckDB extensions uses VCPKG for dependency management. Enabling VCPKG is very simple: follow the [installation instructions](https://vcpkg.io/en/getting-started) or just run the following:
-```shell
-git clone https://github.com/Microsoft/vcpkg.git
-./vcpkg/bootstrap-vcpkg.sh
-export VCPKG_TOOLCHAIN_PATH=`pwd`/vcpkg/scripts/buildsystems/vcpkg.cmake
-```
-Note: VCPKG is only required for extensions that want to rely on it for dependency management. If you want to develop an extension without dependencies, or want to do your own dependency management, just skip this step. Note that the example extension uses VCPKG to build with a dependency for instructive purposes, so when skipping this step the build may not work without removing the dependency.
-
-### Build steps
-Now to build the extension, run:
-```sh
-make
-```
-The main binaries that will be built are:
-```sh
-./build/release/duckdb
-./build/release/test/unittest
-./build/release/extension/onelake/onelake.duckdb_extension
-```
-- `duckdb` is the binary for the duckdb shell with the extension code automatically loaded.
-- `unittest` is the test runner of duckdb. Again, the extension is already linked into the binary.
-- `onelake.duckdb_extension` is the loadable binary as it would be distributed.
+## Features
+- Authentication using:
+    - Azure service principal credentials (or Fabric Workspace Managed Identity).
+    - Credentials from environment variables.
+    - Credentials picked up from the Azure CLI logged in user.
+- Connect to OneLake workspaces and lakehouses.
+- Attach multiple lakehouses from the same OneLake workspace.
+- Set a default lakehouse for queries as a schema.
+- Query Delta Lake tables stored in OneLake lakehouses with SQL syntax.
 
 ## Running the extension
 
@@ -46,6 +30,10 @@ Before starting the shell, export the following environment variable to point to
 ```sh
 export CURL_CA_PATH=/etc/ssl/certs
 # This path may vary based on your operating system and installation but is necessary for successful connections through the delta extension when attempting to validate tokens.
+
+# Optional if using the CLI authentication method
+az login
+
 ```
 Then start the DuckDB shell:
 ```sh
@@ -62,6 +50,11 @@ CREATE SECRET  (
     CLIENT_ID '<your_client_id>',
     CLIENT_SECRET '<your_client_secret>'
 );
+-- CREATE SECRET  (
+--     TYPE azure,
+--     PROVIDER credential_chain,
+--     CHAIN 'cli'
+-- );
 
 CREATE SECRET onelake (
     TYPE ONELAKE,
@@ -69,6 +62,12 @@ CREATE SECRET onelake (
     CLIENT_ID '<your_client_id>',
     CLIENT_SECRET '<your_client_secret>'
 );
+
+-- CREATE SECRET  onelake(
+--     TYPE ONELAKE,
+--     PROVIDER credential_chain,
+--     CHAIN 'cli'
+-- );
 
 ATTACH 'onelake://<your_workspace_id>'
       AS <your_connection_name>
@@ -106,3 +105,27 @@ CREATE SECRET  (
 );
 ```
 
+## Building
+### Managing dependencies
+DuckDB extensions uses VCPKG for dependency management. Enabling VCPKG is very simple: follow the [installation instructions](https://vcpkg.io/en/getting-started) or just run the following:
+```shell
+git clone https://github.com/Microsoft/vcpkg.git
+./vcpkg/bootstrap-vcpkg.sh
+export VCPKG_TOOLCHAIN_PATH=`pwd`/vcpkg/scripts/buildsystems/vcpkg.cmake
+```
+Note: VCPKG is only required for extensions that want to rely on it for dependency management. If you want to develop an extension without dependencies, or want to do your own dependency management, just skip this step. Note that the example extension uses VCPKG to build with a dependency for instructive purposes, so when skipping this step the build may not work without removing the dependency.
+
+### Build steps
+Now to build the extension, run:
+```sh
+make
+```
+The main binaries that will be built are:
+```sh
+./build/release/duckdb
+./build/release/test/unittest
+./build/release/extension/onelake/onelake.duckdb_extension
+```
+- `duckdb` is the binary for the duckdb shell with the extension code automatically loaded.
+- `unittest` is the test runner of duckdb. Again, the extension is already linked into the binary.
+- `onelake.duckdb_extension` is the loadable binary as it would be distributed.
