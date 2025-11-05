@@ -8,6 +8,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/value.hpp"
+#include <iostream>
 
 namespace duckdb {
 
@@ -58,6 +59,10 @@ unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(optional_ptr<Storage
 	if (!secret_match.HasMatch()) {
 		throw InvalidInputException("No OneLake secret found. Create a secret with: CREATE SECRET (TYPE ONELAKE, ...)");
 	}
+	{
+		auto scope_used = secret_match.GetSecret().GetScope();
+		string scope_debug = scope_used.empty() ? string("<none>") : scope_used[0];
+	}
 
 	auto &secret = secret_match.GetSecret();
 	OneLakeCredentials credentials;
@@ -68,15 +73,39 @@ unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(optional_ptr<Storage
 		throw InvalidInputException("OneLake secret must be a key-value secret");
 	}
 
-	Value tenant_id, client_id, client_secret;
-	if (!kv_secret->TryGetValue("tenant_id", tenant_id) || !kv_secret->TryGetValue("client_id", client_id) ||
-	    !kv_secret->TryGetValue("client_secret", client_secret)) {
-		throw InvalidInputException("OneLake secret must contain tenant_id, client_id, and client_secret");
+	string provider = "service_principal";
+	Value provider_value;
+	if (kv_secret->TryGetValue("provider", provider_value) && !provider_value.IsNull()) {
+		provider = StringUtil::Lower(provider_value.ToString());
 	}
 
-	credentials.tenant_id = tenant_id.ToString();
-	credentials.client_id = client_id.ToString();
-	credentials.client_secret = client_secret.ToString();
+	if (provider == "credential_chain") {
+		credentials.provider = OneLakeCredentialProvider::CredentialChain;
+
+		Value chain_value;
+		if (!kv_secret->TryGetValue("chain", chain_value) || chain_value.IsNull()) {
+			throw InvalidInputException("OneLake credential_chain secret must contain chain");
+		}
+		{
+			std::string chain_str = chain_value.ToString();
+			StringUtil::Trim(chain_str);
+			credentials.credential_chain = StringUtil::Lower(chain_str);
+		}
+	} else if (provider == "service_principal") {
+		credentials.provider = OneLakeCredentialProvider::ServicePrincipal;
+
+		Value tenant_id, client_id, client_secret;
+		if (!kv_secret->TryGetValue("tenant_id", tenant_id) || !kv_secret->TryGetValue("client_id", client_id) ||
+		    !kv_secret->TryGetValue("client_secret", client_secret)) {
+			throw InvalidInputException("OneLake secret must contain tenant_id, client_id, and client_secret");
+		}
+
+		credentials.tenant_id = tenant_id.ToString();
+		credentials.client_id = client_id.ToString();
+		credentials.client_secret = client_secret.ToString();
+	} else {
+		throw InvalidInputException("Unsupported OneLake secret provider: %s", provider);
+	}
 
 	if (!credentials.IsValid()) {
 		throw InvalidInputException("Invalid OneLake credentials provided");

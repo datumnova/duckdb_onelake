@@ -4,9 +4,15 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/interval.hpp"
+#include <azure/core/context.hpp>
+#include <azure/core/credentials/credentials.hpp>
+#include <azure/identity/default_azure_credential.hpp>
 #include <curl/curl.h>
 #include <json/json.h>
 #include <unordered_set>
+#include <memory>
+#include <chrono>
+#include <iostream>
 
 namespace duckdb {
 
@@ -120,6 +126,33 @@ string OneLakeAPI::GetAccessToken(OneLakeCredentials &credentials, OneLakeTokenA
 		}
 	}
 
+	if (credentials.provider == OneLakeCredentialProvider::CredentialChain) {
+		try {
+			auto credential = std::make_shared<Azure::Identity::DefaultAzureCredential>();
+			Azure::Core::Credentials::TokenRequestContext request_context;
+			request_context.Scopes = {scope};
+			Azure::Core::Context azure_context;
+			auto access_token_result = credential->GetToken(request_context, azure_context);
+			auto access_token = access_token_result.Token;
+			auto expires_on = access_token_result.ExpiresOn.time_since_epoch();
+			auto expires_microseconds = std::chrono::duration_cast<std::chrono::microseconds>(expires_on).count();
+			auto expiry = Timestamp::FromEpochMicroSeconds(expires_microseconds);
+
+			OneLakeCredentials::TokenCacheEntry entry;
+			entry.token = access_token;
+			entry.expiry = expiry;
+			credentials.token_cache[scope] = entry;
+
+			return access_token;
+		} catch (const std::exception &ex) {
+			throw IOException("Failed to obtain OneLake access token via Azure credential chain: %s", ex.what());
+		}
+	}
+
+	if (credentials.provider != OneLakeCredentialProvider::ServicePrincipal) {
+		throw IOException("Unsupported OneLake credential provider encountered when requesting token");
+	}
+
 	CURL *curl;
 	CURLcode res;
 	string response_string;
@@ -229,13 +262,17 @@ string OneLakeAPI::MakeAPIRequest(ClientContext &context, const string &url, One
 	curl_slist_free_all(headers);
 	curl_easy_cleanup(curl);
 	if (res != CURLE_OK) {
+		std::cerr << "[OneLakeAPI] curl error while calling " << url << ": " << curl_easy_strerror(res) << std::endl;
 		throw IOException("OneLake API request failed: %s", curl_easy_strerror(res));
 	}
 
 	if (response_code == 404 && allow_not_found) {
+		std::cerr << "[OneLakeAPI] HTTP 404 (allowed) from " << url << std::endl;
 		return string();
 	}
 	if (response_code < 200 || response_code >= 300) {
+		std::cerr << "[OneLakeAPI] HTTP " << response_code << " error from " << url << ": " << response_string
+		          << std::endl;
 		throw IOException("OneLake API returned error: HTTP %ld - %s", response_code, response_string.c_str());
 	}
 

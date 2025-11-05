@@ -2,7 +2,8 @@
         "dependencies": [
                 "openssl",
                 "curl",
-                "jsoncpp"
+                "jsoncpp",
+                "azure-identity-cpp"
         ],
         "vcpkg-configuration": {
                 "overlay-ports": [

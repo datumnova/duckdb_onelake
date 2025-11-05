@@ -31,6 +31,9 @@ void SetEnvIfUnset(const char *name, const string &value) {
 }
 
 void EnsureAzureClientCredentialEnv(const OneLakeCredentials &credentials) {
+	if (credentials.provider != OneLakeCredentialProvider::ServicePrincipal) {
+		return;
+	}
 	SetEnvIfUnset("AZURE_CLIENT_ID", credentials.client_id);
 	SetEnvIfUnset("AZURE_TENANT_ID", credentials.tenant_id);
 	SetEnvIfUnset("AZURE_CLIENT_SECRET", credentials.client_secret);
