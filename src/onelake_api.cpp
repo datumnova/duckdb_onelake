@@ -262,17 +262,13 @@ string OneLakeAPI::MakeAPIRequest(ClientContext &context, const string &url, One
 	curl_slist_free_all(headers);
 	curl_easy_cleanup(curl);
 	if (res != CURLE_OK) {
-		std::cerr << "[OneLakeAPI] curl error while calling " << url << ": " << curl_easy_strerror(res) << std::endl;
 		throw IOException("OneLake API request failed: %s", curl_easy_strerror(res));
 	}
 
 	if (response_code == 404 && allow_not_found) {
-		std::cerr << "[OneLakeAPI] HTTP 404 (allowed) from " << url << std::endl;
 		return string();
 	}
 	if (response_code < 200 || response_code >= 300) {
-		std::cerr << "[OneLakeAPI] HTTP " << response_code << " error from " << url << ": " << response_string
-		          << std::endl;
 		throw IOException("OneLake API returned error: HTTP %ld - %s", response_code, response_string.c_str());
 	}
 
@@ -281,6 +277,103 @@ string OneLakeAPI::MakeAPIRequest(ClientContext &context, const string &url, One
 
 string OneLakeAPI::BuildAPIUrl(const string &workspace_id, const string &endpoint) {
 	return "https://api.fabric.microsoft.com/v1/workspaces/" + workspace_id + "/" + endpoint;
+}
+
+vector<OneLakeWorkspace> OneLakeAPI::GetWorkspaces(ClientContext &context, OneLakeCredentials &credentials) {
+	vector<OneLakeWorkspace> workspaces;
+	std::unordered_set<string> visited_urls;
+	string next_url = "https://api.fabric.microsoft.com/v1/workspaces";
+
+	while (!next_url.empty()) {
+		if (!visited_urls.insert(next_url).second) {
+			break;
+		}
+
+		string response = MakeAPIRequest(context, next_url, credentials);
+
+		try {
+			Json::Value root;
+			Json::Reader reader;
+
+			if (!reader.parse(response, root)) {
+				throw InvalidInputException("Failed to parse JSON workspaces response");
+			}
+
+			if (root.isMember("error")) {
+				const auto &error_obj = root["error"];
+				if (error_obj.isObject() && error_obj.isMember("message")) {
+					throw InvalidInputException("OneLake API error while listing workspaces: %s",
+					                            error_obj["message"].asString());
+				}
+				throw InvalidInputException("OneLake API error while listing workspaces: %s",
+				                            error_obj.toStyledString());
+			}
+
+			const Json::Value *workspace_array = nullptr;
+			if (root.isMember("value") && root["value"].isArray()) {
+				workspace_array = &root["value"];
+			} else if (root.isMember("data") && root["data"].isArray()) {
+				workspace_array = &root["data"];
+			}
+
+			if (workspace_array) {
+				for (const auto &workspace_json : *workspace_array) {
+					if (!workspace_json.isMember("id")) {
+						continue;
+					}
+
+					OneLakeWorkspace workspace;
+					workspace.id = workspace_json["id"].asString();
+					if (workspace_json.isMember("name") && workspace_json["name"].isString()) {
+						workspace.name = workspace_json["name"].asString();
+					}
+					if (workspace_json.isMember("displayName") && workspace_json["displayName"].isString()) {
+						workspace.display_name = workspace_json["displayName"].asString();
+						if (workspace.name.empty()) {
+							workspace.name = workspace.display_name;
+						}
+					}
+					if (workspace_json.isMember("description") && workspace_json["description"].isString()) {
+						workspace.description = workspace_json["description"].asString();
+					}
+
+					workspaces.push_back(std::move(workspace));
+				}
+			}
+
+			if (root.isMember("continuationUri") && root["continuationUri"].isString()) {
+				auto candidate = root["continuationUri"].asString();
+				if (!candidate.empty()) {
+					next_url = candidate;
+					continue;
+				}
+			}
+
+			if (root.isMember("continuationToken") && root["continuationToken"].isString()) {
+				auto token = root["continuationToken"].asString();
+				if (!token.empty()) {
+					CURL *curl = curl_easy_init();
+					string encoded_token = token;
+					if (curl) {
+						char *escaped = curl_easy_escape(curl, token.c_str(), static_cast<int>(token.size()));
+						if (escaped) {
+							encoded_token = string(escaped);
+							curl_free(escaped);
+						}
+						curl_easy_cleanup(curl);
+					}
+					next_url = "https://api.fabric.microsoft.com/v1/workspaces?continuationToken=" + encoded_token;
+					continue;
+				}
+			}
+
+			next_url.clear();
+		} catch (const std::exception &e) {
+			throw InvalidInputException("Failed to parse workspaces response: %s", e.what());
+		}
+	}
+
+	return workspaces;
 }
 
 vector<OneLakeLakehouse> OneLakeAPI::GetLakehouses(ClientContext &context, const string &workspace_id,

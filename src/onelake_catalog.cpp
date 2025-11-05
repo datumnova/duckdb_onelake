@@ -11,7 +11,8 @@ namespace duckdb {
 OneLakeCatalog::OneLakeCatalog(AttachedDatabase &db_p, const string &workspace_id, const string &catalog_name,
                                OneLakeCredentials credentials, string default_schema_p)
     : Catalog(db_p), workspace_id(workspace_id), access_mode(AccessMode::AUTOMATIC),
-      credentials(std::move(credentials)), schemas(*this), default_schema(std::move(default_schema_p)) {
+      credentials(std::move(credentials)), schemas(*this), default_schema(std::move(default_schema_p)),
+      configured_default_preference(default_schema), user_configured_default(!default_schema.empty()) {
 }
 
 OneLakeCatalog::~OneLakeCatalog() = default;

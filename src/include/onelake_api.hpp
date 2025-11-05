@@ -9,6 +9,8 @@ enum class OneLakeTokenAudience { Fabric, OneLakeDfs };
 
 class OneLakeAPI {
 public:
+	static vector<OneLakeWorkspace> GetWorkspaces(ClientContext &context, OneLakeCredentials &credentials);
+
 	static vector<OneLakeLakehouse> GetLakehouses(ClientContext &context, const string &workspace_id,
 	                                              OneLakeCredentials &credentials);
 

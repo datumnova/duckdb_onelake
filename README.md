@@ -18,6 +18,10 @@ DISCLAIMER: Currently, this extension is in an experimental phase and only suppo
 - Set a default lakehouse for queries as a schema.
 - Query Delta Lake tables stored in OneLake lakehouses with SQL syntax.
 
+### Current Limitations
+
+- The Extension only works with normal Lakehouses, schema enabled Lakehouses fail to attach due to the Fabric API limitation [More here](https://learn.microsoft.com/en-us/fabric/data-engineering/lakehouse-schemas#public-preview-limitations)
+
 ## Running the extension
 
 # Prerequisites
@@ -73,12 +77,16 @@ ATTACH 'onelake://<your_workspace_id>'
       AS <your_connection_name>
       (TYPE ONELAKE, DEFAULT_LAKEHOUSE '<your_lakehouse_id_or_name>');
 
+-- Alternatively, provide workspace and lakehouse names and let the extension resolve them:
+ATTACH '<your_workspace_name>/<your_lakehouse_name>.Lakehouse'
+    AS <your_connection_name>
+    (TYPE ONELAKE);
+
 USE <your_connection_name>;
 
 SHOW TABLES;
 
 SELECT * FROM <your_table_name> LIMIT 10;
-SELECT * FROM <second_lakehouse>.<your_table_name> LIMIT 10;
 ```
 
 Optionally, you can replace the secret creation and authentication steps by setting the following environment variables before starting the DuckDB shell:
