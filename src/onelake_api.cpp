@@ -231,7 +231,6 @@ string OneLakeAPI::GetAccessToken(OneLakeCredentials &credentials, OneLakeTokenA
 string OneLakeAPI::MakeAPIRequest(ClientContext &context, const string &url, OneLakeCredentials &credentials,
                                   bool allow_not_found) {
 	(void)context;
-	
 
 	string access_token = GetAccessToken(credentials, OneLakeTokenAudience::Fabric);
 

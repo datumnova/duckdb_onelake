@@ -48,8 +48,6 @@ unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(optional_ptr<Storage
 		}
 	}
 
-	
-
 	// Try to get the secret for OneLake credentials
 	auto catalog_transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
 	// Scope secrets on the specific workspace to allow standard DuckDB secret resolution
@@ -64,7 +62,6 @@ unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(optional_ptr<Storage
 	{
 		auto scope_used = secret_match.GetSecret().GetScope();
 		string scope_debug = scope_used.empty() ? string("<none>") : scope_used[0];
-		
 	}
 
 	auto &secret = secret_match.GetSecret();
