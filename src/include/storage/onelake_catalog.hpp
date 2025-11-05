@@ -59,8 +59,11 @@ public:
 	const OneLakeCredentials &GetCredentials() const {
 		return credentials;
 	}
-	const string &GetConfiguredDefaultSchema() const {
-		return default_schema;
+	bool HasUserConfiguredDefault() const {
+		return user_configured_default;
+	}
+	const string &GetConfiguredDefaultPreference() const {
+		return configured_default_preference;
 	}
 	bool HasDefaultSchema() const;
 	void SetDefaultSchema(const string &schema_name);
@@ -69,6 +72,8 @@ public:
 private:
 	OneLakeSchemaSet schemas;
 	string default_schema;
+	string configured_default_preference;
+	bool user_configured_default;
 };
 
 } // namespace duckdb

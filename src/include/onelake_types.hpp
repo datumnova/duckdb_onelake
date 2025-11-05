@@ -5,6 +5,13 @@
 
 namespace duckdb {
 
+struct OneLakeWorkspace {
+	string id;
+	string name;
+	string display_name;
+	string description;
+};
+
 struct OneLakeLakehouse {
 	string id;
 	string name;
