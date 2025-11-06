@@ -6,7 +6,7 @@ This repository is based on https://github.com/duckdb/extension-template, check 
 
 This extension, Onelake, allow you to connect DuckDB to OneLake workspaces and lakehouses, enabling you to query data stored in OneLake directly from DuckDB.
 
-DISCLAIMER: Currently, this extension is in an experimental phase and only supports reading Delta Lake tables in lakehouses created without schema.
+DISCLAIMER: Currently, this extension is in an experimental phase and only supports reading Delta and Iceberg tables in lakehouses created without schema.
 
 ## Features
 - Authentication using:
@@ -16,11 +16,15 @@ DISCLAIMER: Currently, this extension is in an experimental phase and only suppo
 - Connect to OneLake workspaces and lakehouses.
 - Attach multiple lakehouses from the same OneLake workspace.
 - Set a default lakehouse for queries as a schema.
-- Query Delta Lake tables stored in OneLake lakehouses with SQL syntax.
+- Query Delta and Iceberg tables stored in OneLake lakehouses with SQL syntax.
 
 ### Current Limitations
 
 - The Extension only works with normal Lakehouses, schema enabled Lakehouses fail to attach due to the Fabric API limitation [More here](https://learn.microsoft.com/en-us/fabric/data-engineering/lakehouse-schemas#public-preview-limitations)
+
+### Detailed Documentation
+For more detailed documentation on the Onelake extension, including architecture, authentication, database attachment, table discovery, Apache Iceberg support, code reference, API integration, and limitations, please refer to the [DOCUMENTATION.md](DOCUMENTATION.md) file.
+
 
 ## Running the extension
 
@@ -86,7 +90,9 @@ USE <your_connection_name>;
 
 SHOW TABLES;
 
-SELECT * FROM <your_table_name> LIMIT 10;
+SELECT * FROM <your_table_name>;
+
+-- SELECT * FROM <your_iceberg_table_name> USING ICEBERG;
 ```
 
 Optionally, you can replace the secret creation and authentication steps by setting the following environment variables before starting the DuckDB shell:

@@ -80,13 +80,17 @@ vector<string> BuildTableRootCandidates(const OneLakeCatalog &catalog, const One
 }
 
 void AddDiscoveredTable(OneLakeCatalog &catalog, OneLakeSchemaEntry &schema, OneLakeTableSet &table_set,
-                        const string &table_name) {
+                        const string &table_name, const string &format, const string &relative_location) {
 	CreateTableInfo info;
 	info.table = table_name;
 	auto table_entry = make_uniq<OneLakeTableEntry>(catalog, schema, info);
-	table_entry->table_data->format = "Delta";
+	table_entry->table_data->format = format.empty() ? "Delta" : format;
 	table_entry->table_data->type = "Table";
-	table_entry->table_data->location = "Tables/" + table_name;
+	if (!relative_location.empty()) {
+		table_entry->table_data->location = relative_location;
+	} else {
+		table_entry->table_data->location = "Tables/" + table_name;
+	}
 	table_set.CreateEntry(std::move(table_entry));
 }
 
@@ -126,18 +130,39 @@ idx_t DiscoverTablesFromStorage(ClientContext &context, OneLakeCatalog &catalog,
 				delta_dir += "_delta_log/";
 				auto delta_entries = OneLakeAPI::ListDirectory(context, delta_dir, catalog.GetCredentials());
 				has_delta_log = !delta_entries.empty();
-			} catch (const Exception &ex) {
-				// Printer::Print(StringUtil::Format("[onelake] failed to inspect '%s/%s': %s", root, leaf, ex.what()));
+			} catch (const Exception &) {
+				// Printer::Print(StringUtil::Format("[onelake] failed to inspect '%s/%s'", root, leaf));
 				has_delta_log = false;
 			}
+			bool has_iceberg_metadata = false;
 			if (!has_delta_log) {
-				// Printer::Print(StringUtil::Format("[onelake] skipping '%s/%s' (missing _delta_log)", root, leaf));
+				try {
+					string table_root = root + leaf;
+					if (!StringUtil::EndsWith(table_root, "/")) {
+						table_root += "/";
+					}
+					auto child_dirs = OneLakeAPI::ListDirectory(context, table_root, catalog.GetCredentials());
+					for (auto &child : child_dirs) {
+						if (StringUtil::CIEquals(child, "metadata")) {
+							has_iceberg_metadata = true;
+							break;
+						}
+					}
+				} catch (const Exception &) {
+					// Printer::Print(StringUtil::Format("[onelake] failed to inspect metadata directory for '%s/%s'",
+					// root, leaf));
+					has_iceberg_metadata = false;
+				}
+			}
+			if (!has_delta_log && !has_iceberg_metadata) {
 				continue;
 			}
 			if (!known_tables.insert(StringUtil::Lower(leaf)).second) {
 				continue;
 			}
-			AddDiscoveredTable(catalog, schema, table_set, leaf);
+			string detected_format = has_delta_log ? "Delta" : "iceberg";
+			string relative_location = "Tables/" + leaf;
+			AddDiscoveredTable(catalog, schema, table_set, leaf, detected_format, relative_location);
 			discovered++;
 			// Printer::Print(
 			//     StringUtil::Format("[onelake] registered storage table '%s' from '%s/%s'", leaf, root, leaf));
