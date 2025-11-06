@@ -1,6 +1,7 @@
 #include "onelake_extension.hpp"
 #include "storage/onelake_storage_extension.hpp"
 #include "onelake_secret.hpp"
+#include "onelake_parser_extension.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/config.hpp"
@@ -15,6 +16,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register storage extension for catalog functionality
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
 	config.storage_extensions["onelake"] = make_uniq<OneLakeStorageExtension>();
+	config.parser_extensions.push_back(CreateOneLakeParserExtension());
 
 	// Try to auto-load dependencies used for Delta access
 	ExtensionHelper::TryAutoLoadExtension(loader.GetDatabaseInstance(), "httpfs");

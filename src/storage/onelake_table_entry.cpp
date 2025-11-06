@@ -29,6 +29,7 @@ namespace duckdb {
 namespace {
 
 constexpr const char *DELTA_FUNCTION_NAME = "delta_scan";
+constexpr const char *ICEBERG_FUNCTION_NAME = "iceberg_scan";
 
 bool HasScheme(const string &path) {
 	return path.find("://") != string::npos;
@@ -217,6 +218,25 @@ TableFunction ResolveDeltaFunction(ClientContext &context) {
 	return table_entry->functions.GetFunctionByOffset(0);
 }
 
+TableFunction ResolveIcebergFunction(ClientContext &context) {
+	auto table_entry = Catalog::GetEntry<TableFunctionCatalogEntry>(
+	    context, INVALID_CATALOG, DEFAULT_SCHEMA, ICEBERG_FUNCTION_NAME, OnEntryNotFound::RETURN_NULL);
+	if (!table_entry) {
+		ExtensionHelper::AutoLoadExtension(context, "iceberg");
+		table_entry = Catalog::GetEntry<TableFunctionCatalogEntry>(context, INVALID_CATALOG, DEFAULT_SCHEMA,
+		                                                           ICEBERG_FUNCTION_NAME, OnEntryNotFound::RETURN_NULL);
+	}
+	if (!table_entry) {
+		throw CatalogException(
+		    "The 'iceberg' extension is required to query OneLake tables in Iceberg format. Install it using INSTALL "
+		    "iceberg; then LOAD iceberg;");
+	}
+	if (table_entry->functions.Size() == 0) {
+		throw InternalException("iceberg_scan function set is empty");
+	}
+	return table_entry->functions.GetFunctionByOffset(0);
+}
+
 unique_ptr<FunctionData> BindDeltaFunction(ClientContext &context, TableFunction &delta_function, const string &path,
                                            vector<LogicalType> &return_types, vector<string> &return_names) {
 	if (!delta_function.bind) {
@@ -236,8 +256,32 @@ unique_ptr<FunctionData> BindDeltaFunction(ClientContext &context, TableFunction
 	return delta_function.bind(context, bind_input, return_types, return_names);
 }
 
+unique_ptr<FunctionData> BindIcebergFunction(ClientContext &context, TableFunction &iceberg_function,
+                                             const string &path, vector<LogicalType> &return_types,
+                                             vector<string> &return_names) {
+	if (!iceberg_function.bind) {
+		throw InternalException("iceberg_scan function does not expose a bind callback");
+	}
+	vector<Value> inputs;
+	inputs.emplace_back(Value(path));
+	named_parameter_map_t named_parameters;
+	vector<LogicalType> input_table_types;
+	vector<string> input_table_names;
+	TableFunctionRef ref;
+	vector<unique_ptr<ParsedExpression>> children;
+	children.push_back(make_uniq<ConstantExpression>(Value(path)));
+	ref.function = make_uniq<FunctionExpression>(ICEBERG_FUNCTION_NAME, std::move(children));
+	TableFunctionBindInput bind_input(inputs, named_parameters, input_table_types, input_table_names, nullptr, nullptr,
+	                                  iceberg_function, ref);
+	return iceberg_function.bind(context, bind_input, return_types, return_names);
+}
+
 bool IsDeltaFormat(const string &format) {
 	return format.empty() || StringUtil::CIEquals(format, "delta");
+}
+
+bool IsIcebergFormat(const string &format) {
+	return StringUtil::CIEquals(format, "iceberg");
 }
 
 } // namespace
@@ -292,16 +336,49 @@ TableFunction OneLakeTableEntry::GetScanFunction(ClientContext &context, unique_
 	if (!table_data) {
 		throw InternalException("Table metadata missing for OneLake table '%s'", name);
 	}
-	if (!IsDeltaFormat(table_data->format)) {
-		throw InvalidInputException("OneLake table '%s' uses unsupported format '%s'", name, table_data->format);
+	string table_format = table_data->format;
+	if (table_format.empty()) {
+		table_format = "delta";
 	}
 
 	ExtensionHelper::TryAutoLoadExtension(context, "httpfs");
 	EnsureHttpBearerSecret(context, catalog, &schema_entry);
 
-	auto delta_function = ResolveDeltaFunction(context);
+	if (!IsDeltaFormat(table_format) && !IsIcebergFormat(table_format)) {
+		throw InvalidInputException("OneLake table '%s' uses unsupported format '%s'", name, table_format);
+	}
+
 	auto candidate_paths = BuildLocationCandidates(catalog, schema_entry, *this, resolved_path);
 
+	if (IsIcebergFormat(table_format)) {
+		auto iceberg_function = ResolveIcebergFunction(context);
+		auto is_abfs = [](const string &candidate) {
+			return StringUtil::StartsWith(candidate, "abfs://") || StringUtil::StartsWith(candidate, "abfss://");
+		};
+		std::stable_partition(candidate_paths.begin(), candidate_paths.end(), is_abfs);
+
+		vector<string> errors;
+		for (auto &candidate : candidate_paths) {
+			try {
+				vector<LogicalType> return_types;
+				vector<string> return_names;
+				auto iceberg_bind =
+				    BindIcebergFunction(context, iceberg_function, candidate, return_types, return_names);
+				UpdateColumnDefinitions(return_names, return_types);
+				resolved_path = candidate;
+				bind_data = std::move(iceberg_bind);
+				return iceberg_function;
+			} catch (const Exception &ex) {
+				errors.push_back(StringUtil::Format("%s (path=%s)", ex.what(), candidate));
+			}
+		}
+
+		string error_summary = errors.empty() ? "no candidate paths resolved" : StringUtil::Join(errors, "; ");
+		throw IOException("Failed to bind Iceberg scan for OneLake table '%s'. Errors: %s", name, error_summary);
+	}
+
+	// Only Delta format remains
+	auto delta_function = ResolveDeltaFunction(context);
 	vector<string> errors;
 	for (auto &candidate : candidate_paths) {
 		try {
