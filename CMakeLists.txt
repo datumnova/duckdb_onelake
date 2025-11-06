@@ -22,8 +22,8 @@ include_directories(src/include)
 # Note that it should also be removed from vcpkg.json to prevent needlessly installing it..
 find_package(OpenSSL REQUIRED)
 find_package(CURL REQUIRED)
-find_package(jsoncpp CONFIG REQUIRED)
-find_package(azure-identity-cpp CONFIG REQUIRED)
+find_package(jsoncpp REQUIRED)
+find_package(azure-identity-cpp REQUIRED)
 
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)

@@ -23,7 +23,8 @@ const string ONELAKE_TABLES_PATH_SEGMENT = "/Tables/";
 
 // Shared helper for constructing ABFSS path
 string BuildAbfssPath(const string &workspace_id, const string &lakehouse_id, const string &table_name) {
-	return "abfss://" + workspace_id + "@onelake.dfs.fabric.microsoft.com/" + lakehouse_id + ONELAKE_TABLES_PATH_SEGMENT + table_name;
+	return "abfss://" + workspace_id + "@onelake.dfs.fabric.microsoft.com/" + lakehouse_id +
+	       ONELAKE_TABLES_PATH_SEGMENT + table_name;
 }
 
 struct OneLakeIcebergParseData : public ParserExtensionParseData {
@@ -142,7 +143,7 @@ ParserExtensionPlanResult OneLakeUsingIcebergPlan(ParserExtensionInfo *, ClientC
 	string catalog_name = iceberg_data.catalog.empty() ? INVALID_CATALOG : iceberg_data.catalog;
 	string schema_name = iceberg_data.schema.empty() ? DEFAULT_SCHEMA : iceberg_data.schema;
 	auto &table_catalog_entry =
-		Catalog::GetEntry<TableCatalogEntry>(context, catalog_name, schema_name, iceberg_data.table);
+	    Catalog::GetEntry<TableCatalogEntry>(context, catalog_name, schema_name, iceberg_data.table);
 	if (table_catalog_entry.type != CatalogType::TABLE_ENTRY) {
 		throw InvalidInputException("Object '%s' is not a table", iceberg_data.table);
 	}

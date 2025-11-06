@@ -220,11 +220,11 @@ TableFunction ResolveDeltaFunction(ClientContext &context) {
 
 TableFunction ResolveIcebergFunction(ClientContext &context) {
 	auto table_entry = Catalog::GetEntry<TableFunctionCatalogEntry>(
-		context, INVALID_CATALOG, DEFAULT_SCHEMA, ICEBERG_FUNCTION_NAME, OnEntryNotFound::RETURN_NULL);
+	    context, INVALID_CATALOG, DEFAULT_SCHEMA, ICEBERG_FUNCTION_NAME, OnEntryNotFound::RETURN_NULL);
 	if (!table_entry) {
 		ExtensionHelper::AutoLoadExtension(context, "iceberg");
 		table_entry = Catalog::GetEntry<TableFunctionCatalogEntry>(context, INVALID_CATALOG, DEFAULT_SCHEMA,
-																   ICEBERG_FUNCTION_NAME, OnEntryNotFound::RETURN_NULL);
+		                                                           ICEBERG_FUNCTION_NAME, OnEntryNotFound::RETURN_NULL);
 	}
 	if (!table_entry) {
 		throw CatalogException(
@@ -363,7 +363,7 @@ TableFunction OneLakeTableEntry::GetScanFunction(ClientContext &context, unique_
 				vector<LogicalType> return_types;
 				vector<string> return_names;
 				auto iceberg_bind =
-					BindIcebergFunction(context, iceberg_function, candidate, return_types, return_names);
+				    BindIcebergFunction(context, iceberg_function, candidate, return_types, return_names);
 				UpdateColumnDefinitions(return_names, return_types);
 				resolved_path = candidate;
 				bind_data = std::move(iceberg_bind);
