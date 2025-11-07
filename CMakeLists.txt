@@ -23,7 +23,7 @@ include_directories(src/include)
 find_package(OpenSSL REQUIRED)
 find_package(CURL REQUIRED)
 find_package(jsoncpp REQUIRED)
-find_package(azure-identity-cpp REQUIRED)
+find_package(azure-identity-cpp CONFIG)
 
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
