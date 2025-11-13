@@ -17,6 +17,17 @@ public:
 	static vector<OneLakeTable> GetTables(ClientContext &context, const string &workspace_id,
 	                                      const string &lakehouse_id, OneLakeCredentials &credentials);
 
+	static vector<OneLakeTable> GetTables(ClientContext &context, const string &workspace_id,
+	                                      const OneLakeLakehouse &lakehouse, OneLakeCredentials &credentials);
+
+	static vector<OneLakeSchema> GetSchemas(ClientContext &context, const string &workspace_id,
+	                                        const string &lakehouse_id, const string &lakehouse_name,
+	                                        OneLakeCredentials &credentials);
+
+	static vector<OneLakeTable> GetTablesFromSchema(ClientContext &context, const string &workspace_id,
+	                                                const string &lakehouse_id, const string &lakehouse_name,
+	                                                const string &schema_name, OneLakeCredentials &credentials);
+
 	static OneLakeTableInfo GetTableInfo(ClientContext &context, const string &workspace_id, const string &lakehouse_id,
 	                                     const string &table_name, OneLakeCredentials &credentials);
 	static vector<string> ListDirectory(ClientContext &context, const string &abfss_path,

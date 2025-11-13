@@ -17,6 +17,14 @@ struct OneLakeLakehouse {
 	string name;
 	string display_name;
 	string description;
+	bool schema_enabled = false;
+	string default_schema;
+};
+
+struct OneLakeSchema {
+	string name;
+	string catalog_name;
+	string full_name;
 };
 
 struct OneLakeTable {
@@ -24,6 +32,7 @@ struct OneLakeTable {
 	string type;   // "Table" or "View"
 	string format; // "Delta", "Parquet", etc.
 	string location;
+	string schema_name; // For schema-enabled lakehouses
 };
 
 struct OneLakeTableInfo {

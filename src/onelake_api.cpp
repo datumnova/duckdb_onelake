@@ -406,6 +406,15 @@ vector<OneLakeLakehouse> OneLakeAPI::GetLakehouses(ClientContext &context, const
 				lakehouse.description = lakehouse_json["description"].asString();
 			}
 
+			// Check if this is a schema-enabled lakehouse
+			if (lakehouse_json.isMember("properties") && lakehouse_json["properties"].isObject()) {
+				const auto &properties = lakehouse_json["properties"];
+				if (properties.isMember("defaultSchema") && properties["defaultSchema"].isString()) {
+					lakehouse.schema_enabled = true;
+					lakehouse.default_schema = properties["defaultSchema"].asString();
+				}
+			}
+
 			lakehouses.push_back(lakehouse);
 		}
 	} catch (const std::exception &e) {
@@ -512,6 +521,214 @@ vector<OneLakeTable> OneLakeAPI::GetTables(ClientContext &context, const string 
 		} catch (const std::exception &e) {
 			throw InvalidInputException("Failed to parse tables response: %s", e.what());
 		}
+	}
+
+	return tables;
+}
+
+vector<OneLakeTable> OneLakeAPI::GetTables(ClientContext &context, const string &workspace_id,
+                                          const OneLakeLakehouse &lakehouse, OneLakeCredentials &credentials) {
+	if (!lakehouse.schema_enabled) {
+		// Use the original API for regular lakehouses
+		return GetTables(context, workspace_id, lakehouse.id, credentials);
+	}
+
+	// For schema-enabled lakehouses, use Unity Catalog API
+	vector<OneLakeTable> all_tables;
+	
+	// First get all schemas
+	auto schemas = GetSchemas(context, workspace_id, lakehouse.id, lakehouse.name, credentials);
+	
+	// Then get tables from each schema
+	for (const auto &schema : schemas) {
+		auto schema_tables = GetTablesFromSchema(context, workspace_id, lakehouse.id, lakehouse.name, 
+		                                        schema.name, credentials);
+		
+		// For schema-enabled lakehouses, prefix table names with schema name
+		for (auto &table : schema_tables) {
+			table.name = schema.name + "__" + table.name;
+			all_tables.push_back(std::move(table));
+		}
+	}
+	
+	return all_tables;
+}
+
+vector<OneLakeSchema> OneLakeAPI::GetSchemas(ClientContext &context, const string &workspace_id,
+                                             const string &lakehouse_id, const string &lakehouse_name,
+                                             OneLakeCredentials &credentials) {
+	vector<OneLakeSchema> schemas;
+
+	// Build Unity Catalog API URL for schemas
+	string url = "https://onelake.table.fabric.microsoft.com/delta/" + workspace_id + "/" + lakehouse_id +
+	             "/api/2.1/unity-catalog/schemas?catalog_name=" + lakehouse_name + ".Lakehouse";
+
+	// Use DFS scope for Unity Catalog API
+	string access_token = GetAccessToken(credentials, OneLakeTokenAudience::OneLakeDfs);
+
+	CURL *curl = curl_easy_init();
+	if (!curl) {
+		throw InternalException("Failed to initialize CURL for Unity Catalog schemas API");
+	}
+
+	string response_string;
+	curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_string);
+	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
+
+	struct curl_slist *headers = nullptr;
+	string auth_header = "Authorization: Bearer " + access_token;
+	headers = curl_slist_append(headers, auth_header.c_str());
+	headers = curl_slist_append(headers, "Content-Type: application/json");
+	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+	CURLcode res = curl_easy_perform(curl);
+	long response_code;
+	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+
+	curl_slist_free_all(headers);
+	curl_easy_cleanup(curl);
+
+	if (res != CURLE_OK) {
+		throw IOException("Unity Catalog schemas API request failed: %s", curl_easy_strerror(res));
+	}
+
+	if (response_code < 200 || response_code >= 300) {
+		throw IOException("Unity Catalog schemas API returned error: HTTP %ld - %s", response_code, response_string.c_str());
+	}
+
+	try {
+		Json::Value root;
+		Json::Reader reader;
+
+		if (!reader.parse(response_string, root)) {
+			throw InvalidInputException("Failed to parse JSON schemas response");
+		}
+
+		if (root.isMember("schemas") && root["schemas"].isArray()) {
+			for (const auto &schema_json : root["schemas"]) {
+				if (!schema_json.isMember("name")) {
+					continue;
+				}
+
+				OneLakeSchema schema;
+				schema.name = schema_json["name"].asString();
+				if (schema_json.isMember("catalog_name")) {
+					schema.catalog_name = schema_json["catalog_name"].asString();
+				}
+				if (schema_json.isMember("full_name")) {
+					schema.full_name = schema_json["full_name"].asString();
+				}
+
+				schemas.push_back(std::move(schema));
+			}
+		}
+	} catch (const std::exception &e) {
+		throw InvalidInputException("Failed to parse schemas response: %s", e.what());
+	}
+
+	return schemas;
+}
+
+vector<OneLakeTable> OneLakeAPI::GetTablesFromSchema(ClientContext &context, const string &workspace_id,
+                                                     const string &lakehouse_id, const string &lakehouse_name,
+                                                     const string &schema_name, OneLakeCredentials &credentials) {
+	vector<OneLakeTable> tables;
+
+	// Build Unity Catalog API URL for tables in schema
+	string url = "https://onelake.table.fabric.microsoft.com/delta/" + workspace_id + "/" + lakehouse_id +
+	             "/api/2.1/unity-catalog/tables?catalog_name=" + lakehouse_name + ".Lakehouse&schema_name=" + schema_name;
+
+	// Use DFS scope for Unity Catalog API
+	string access_token = GetAccessToken(credentials, OneLakeTokenAudience::OneLakeDfs);
+
+	CURL *curl = curl_easy_init();
+	if (!curl) {
+		throw InternalException("Failed to initialize CURL for Unity Catalog tables API");
+	}
+
+	string response_string;
+	curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_string);
+	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
+
+	struct curl_slist *headers = nullptr;
+	string auth_header = "Authorization: Bearer " + access_token;
+	headers = curl_slist_append(headers, auth_header.c_str());
+	headers = curl_slist_append(headers, "Content-Type: application/json");
+	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+	CURLcode res = curl_easy_perform(curl);
+	long response_code;
+	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+
+	curl_slist_free_all(headers);
+	curl_easy_cleanup(curl);
+
+	if (res != CURLE_OK) {
+		throw IOException("Unity Catalog tables API request failed: %s", curl_easy_strerror(res));
+	}
+
+	if (response_code < 200 || response_code >= 300) {
+		throw IOException("Unity Catalog tables API returned error: HTTP %ld - %s", response_code, response_string.c_str());
+	}
+
+	try {
+		Json::Value root;
+		Json::Reader reader;
+
+		if (!reader.parse(response_string, root)) {
+			throw InvalidInputException("Failed to parse JSON schema tables response");
+		}
+
+		if (root.isMember("tables") && root["tables"].isArray()) {
+			for (const auto &table_json : root["tables"]) {
+				if (!table_json.isMember("name")) {
+					continue;
+				}
+
+				OneLakeTable table;
+				table.name = table_json["name"].asString();
+				table.schema_name = schema_name;
+				table.type = "Table"; // Unity Catalog tables are typically "Table"
+				
+				if (table_json.isMember("data_source_format")) {
+					table.format = table_json["data_source_format"].asString();
+				} else {
+					table.format = "Delta"; // Default for Unity Catalog
+				}
+
+				if (table_json.isMember("storage_location")) {
+					string storage_location = table_json["storage_location"].asString();
+					if (StringUtil::StartsWith(storage_location, "https://")) {
+						// Convert from https://onelake.dfs.fabric.microsoft.com/<workspaceID>/<LakehouseID>/Tables/<schema>/<table_name>
+						// to abfss://<workspaceID>@onelake.dfs.fabric.microsoft.com/<LakehouseID>/Tables/<schema>/<table_name>
+						const string https_prefix = "https://onelake.dfs.fabric.microsoft.com/";
+						if (StringUtil::StartsWith(storage_location, https_prefix)) {
+							string path_part = storage_location.substr(https_prefix.size());
+							auto slash_pos = path_part.find('/');
+							if (slash_pos != string::npos) {
+								string workspace_part = path_part.substr(0, slash_pos);
+								string remaining_path = path_part.substr(slash_pos + 1);
+								table.location = "abfss://" + workspace_part + "@onelake.dfs.fabric.microsoft.com/" + remaining_path;
+							} else {
+								table.location = storage_location;
+							}
+						} else {
+							table.location = storage_location;
+						}
+					} else {
+						table.location = storage_location;
+					}
+				}
+
+				tables.push_back(std::move(table));
+			}
+		}
+	} catch (const std::exception &e) {
+		throw InvalidInputException("Failed to parse schema tables response: %s", e.what());
 	}
 
 	return tables;

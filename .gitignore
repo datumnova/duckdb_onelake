@@ -12,3 +12,4 @@ test/python/__pycache__/
 .venv/
 __pycache__/
 vcpkg_installed/
+local-test
