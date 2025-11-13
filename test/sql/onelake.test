@@ -32,9 +32,9 @@ CREATE SECRET onelake (
 );
 
 statement ok
-ATTACH 'onelake://AZURE_WORKSPACE_ID'
+ATTACH 'AZURE_WORKSPACE_ID'.'your_lakehouse_id_or_name'
       AS your_connection_name
-      (TYPE ONELAKE, DEFAULT_LAKEHOUSE 'your_lakehouse_id_or_name');
+      (TYPE ONELAKE);
 
 #statement ok
 #USE your_connection_name;
