@@ -80,50 +80,39 @@ static string NormalizeLakehouseToken(string token) {
 
 static ParsedAttachTarget ParseAttachTarget(const string &raw_identifier) {
 	if (raw_identifier.empty()) {
-		throw InvalidInputException("OneLake workspace identifier must be provided in ATTACH statement");
+		throw InvalidInputException("OneLake ATTACH path must be in format 'workspace-name/lakehouse-name.Lakehouse'");
 	}
 	string working = raw_identifier;
 	StringUtil::Trim(working);
 	if (working.empty()) {
-		throw InvalidInputException("OneLake workspace identifier must not be empty");
+		throw InvalidInputException("OneLake ATTACH path must be in format 'workspace-name/lakehouse-name.Lakehouse'");
 	}
 
-	const string scope_prefix = "onelake://";
-	if (StringUtil::StartsWith(working, scope_prefix)) {
-		working = working.substr(scope_prefix.size());
-		StringUtil::Trim(working);
-		if (working.empty()) {
-			throw InvalidInputException("OneLake workspace identifier must not be empty");
-		}
-	}
-
-	ParsedAttachTarget result;
+	// Find the required slash separator
 	auto slash_pos = working.find('/');
-	string workspace_part = working;
-	string remainder;
-	if (slash_pos != string::npos) {
-		workspace_part = working.substr(0, slash_pos);
-		remainder = working.substr(slash_pos + 1);
+	if (slash_pos == string::npos) {
+		throw InvalidInputException("OneLake ATTACH path must be in format 'workspace-name/lakehouse-name.Lakehouse'");
+	}
+
+	string workspace_part = working.substr(0, slash_pos);
+	string lakehouse_part = working.substr(slash_pos + 1);
+
+	// Check for additional path segments (not allowed)
+	if (lakehouse_part.find('/') != string::npos) {
+		throw InvalidInputException("OneLake ATTACH path must be in format 'workspace-name/lakehouse-name.Lakehouse'");
 	}
 
 	StringUtil::Trim(workspace_part);
-	if (workspace_part.empty()) {
-		throw InvalidInputException("OneLake workspace identifier must not be empty");
-	}
-	result.workspace_token = workspace_part;
+	StringUtil::Trim(lakehouse_part);
 
-	if (!remainder.empty()) {
-		// Only consider the first path segment after the workspace token
-		auto second_slash = remainder.find('/');
-		if (second_slash != string::npos) {
-			remainder = remainder.substr(0, second_slash);
-		}
-		StringUtil::Trim(remainder);
-		if (!remainder.empty()) {
-			result.lakehouse_token = NormalizeLakehouseToken(remainder);
-			result.has_lakehouse = true;
-		}
+	if (workspace_part.empty() || lakehouse_part.empty()) {
+		throw InvalidInputException("OneLake ATTACH path must be in format 'workspace-name/lakehouse-name.Lakehouse'");
 	}
+
+	ParsedAttachTarget result;
+	result.workspace_token = workspace_part;
+	result.lakehouse_token = NormalizeLakehouseToken(lakehouse_part);
+	result.has_lakehouse = true;
 
 	return result;
 }
@@ -234,34 +223,18 @@ unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(optional_ptr<Storage
                                                             AttachOptions &attach_options) {
 	auto &secret_manager = SecretManager::Get(context);
 
-	// Determine workspace token and optional lakehouse from ATTACH target
+	// Parse workspace and lakehouse from ATTACH target (required format: workspace/lakehouse.Lakehouse)
 	string attach_target = info.path.empty() ? name : info.path;
 	auto parsed_target = ParseAttachTarget(attach_target);
 	string workspace_token = parsed_target.workspace_token;
-	string default_lakehouse;
-	bool default_from_path = false;
-	if (parsed_target.has_lakehouse) {
-		default_lakehouse = parsed_target.lakehouse_token;
-		default_from_path = true;
-	}
+	string default_lakehouse = parsed_target.lakehouse_token;
 
+	// Check for unsupported options
 	for (auto &option : info.options) {
-		if (!StringUtil::CIEquals(option.first, "default_lakehouse") || option.second.IsNull()) {
-			continue;
+		if (StringUtil::CIEquals(option.first, "default_lakehouse")) {
+			throw InvalidInputException("DEFAULT_LAKEHOUSE option is not supported. Specify lakehouse in ATTACH path: "
+			                            "'workspace-name/lakehouse-name.Lakehouse'");
 		}
-		string option_value;
-		if (option.second.type().id() == LogicalTypeId::VARCHAR) {
-			option_value = StringValue::Get(option.second);
-		} else {
-			option_value = option.second.ToString();
-		}
-		StringUtil::Trim(option_value);
-		if (default_from_path && !StringUtil::CIEquals(default_lakehouse, option_value)) {
-			throw InvalidInputException(
-			    "Default lakehouse specified both in ATTACH target and options with conflicting values");
-		}
-		default_lakehouse = option_value;
-		default_from_path = true;
 	}
 
 	// Resolve credentials using the most specific secret available
