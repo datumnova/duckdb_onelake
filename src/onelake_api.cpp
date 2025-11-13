@@ -527,7 +527,7 @@ vector<OneLakeTable> OneLakeAPI::GetTables(ClientContext &context, const string 
 }
 
 vector<OneLakeTable> OneLakeAPI::GetTables(ClientContext &context, const string &workspace_id,
-                                          const OneLakeLakehouse &lakehouse, OneLakeCredentials &credentials) {
+                                           const OneLakeLakehouse &lakehouse, OneLakeCredentials &credentials) {
 	if (!lakehouse.schema_enabled) {
 		// Use the original API for regular lakehouses
 		return GetTables(context, workspace_id, lakehouse.id, credentials);
@@ -535,22 +535,22 @@ vector<OneLakeTable> OneLakeAPI::GetTables(ClientContext &context, const string 
 
 	// For schema-enabled lakehouses, use Unity Catalog API
 	vector<OneLakeTable> all_tables;
-	
+
 	// First get all schemas
 	auto schemas = GetSchemas(context, workspace_id, lakehouse.id, lakehouse.name, credentials);
-	
+
 	// Then get tables from each schema
 	for (const auto &schema : schemas) {
-		auto schema_tables = GetTablesFromSchema(context, workspace_id, lakehouse.id, lakehouse.name, 
-		                                        schema.name, credentials);
-		
+		auto schema_tables =
+		    GetTablesFromSchema(context, workspace_id, lakehouse.id, lakehouse.name, schema.name, credentials);
+
 		// For schema-enabled lakehouses, prefix table names with schema name
 		for (auto &table : schema_tables) {
 			table.name = schema.name + "__" + table.name;
 			all_tables.push_back(std::move(table));
 		}
 	}
-	
+
 	return all_tables;
 }
 
@@ -595,7 +595,8 @@ vector<OneLakeSchema> OneLakeAPI::GetSchemas(ClientContext &context, const strin
 	}
 
 	if (response_code < 200 || response_code >= 300) {
-		throw IOException("Unity Catalog schemas API returned error: HTTP %ld - %s", response_code, response_string.c_str());
+		throw IOException("Unity Catalog schemas API returned error: HTTP %ld - %s", response_code,
+		                  response_string.c_str());
 	}
 
 	try {
@@ -638,7 +639,8 @@ vector<OneLakeTable> OneLakeAPI::GetTablesFromSchema(ClientContext &context, con
 
 	// Build Unity Catalog API URL for tables in schema
 	string url = "https://onelake.table.fabric.microsoft.com/delta/" + workspace_id + "/" + lakehouse_id +
-	             "/api/2.1/unity-catalog/tables?catalog_name=" + lakehouse_name + ".Lakehouse&schema_name=" + schema_name;
+	             "/api/2.1/unity-catalog/tables?catalog_name=" + lakehouse_name +
+	             ".Lakehouse&schema_name=" + schema_name;
 
 	// Use DFS scope for Unity Catalog API
 	string access_token = GetAccessToken(credentials, OneLakeTokenAudience::OneLakeDfs);
@@ -672,7 +674,8 @@ vector<OneLakeTable> OneLakeAPI::GetTablesFromSchema(ClientContext &context, con
 	}
 
 	if (response_code < 200 || response_code >= 300) {
-		throw IOException("Unity Catalog tables API returned error: HTTP %ld - %s", response_code, response_string.c_str());
+		throw IOException("Unity Catalog tables API returned error: HTTP %ld - %s", response_code,
+		                  response_string.c_str());
 	}
 
 	try {
@@ -693,7 +696,7 @@ vector<OneLakeTable> OneLakeAPI::GetTablesFromSchema(ClientContext &context, con
 				table.name = table_json["name"].asString();
 				table.schema_name = schema_name;
 				table.type = "Table"; // Unity Catalog tables are typically "Table"
-				
+
 				if (table_json.isMember("data_source_format")) {
 					table.format = table_json["data_source_format"].asString();
 				} else {
@@ -703,8 +706,10 @@ vector<OneLakeTable> OneLakeAPI::GetTablesFromSchema(ClientContext &context, con
 				if (table_json.isMember("storage_location")) {
 					string storage_location = table_json["storage_location"].asString();
 					if (StringUtil::StartsWith(storage_location, "https://")) {
-						// Convert from https://onelake.dfs.fabric.microsoft.com/<workspaceID>/<LakehouseID>/Tables/<schema>/<table_name>
-						// to abfss://<workspaceID>@onelake.dfs.fabric.microsoft.com/<LakehouseID>/Tables/<schema>/<table_name>
+						// Convert from
+						// https://onelake.dfs.fabric.microsoft.com/<workspaceID>/<LakehouseID>/Tables/<schema>/<table_name>
+						// to
+						// abfss://<workspaceID>@onelake.dfs.fabric.microsoft.com/<LakehouseID>/Tables/<schema>/<table_name>
 						const string https_prefix = "https://onelake.dfs.fabric.microsoft.com/";
 						if (StringUtil::StartsWith(storage_location, https_prefix)) {
 							string path_part = storage_location.substr(https_prefix.size());
@@ -712,7 +717,8 @@ vector<OneLakeTable> OneLakeAPI::GetTablesFromSchema(ClientContext &context, con
 							if (slash_pos != string::npos) {
 								string workspace_part = path_part.substr(0, slash_pos);
 								string remaining_path = path_part.substr(slash_pos + 1);
-								table.location = "abfss://" + workspace_part + "@onelake.dfs.fabric.microsoft.com/" + remaining_path;
+								table.location =
+								    "abfss://" + workspace_part + "@onelake.dfs.fabric.microsoft.com/" + remaining_path;
 							} else {
 								table.location = storage_location;
 							}

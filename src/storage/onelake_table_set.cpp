@@ -215,7 +215,8 @@ void OneLakeTableSet::LoadEntries(ClientContext &context) {
 				if (!table_info.has_metadata) {
 					detail_endpoint_supported = false;
 					if (!detail_endpoint_reported) {
-						// Printer::Print("[onelake] table detail endpoint returned no metadata; continuing without it");
+						// Printer::Print("[onelake] table detail endpoint returned no metadata; continuing without
+						// it");
 						detail_endpoint_reported = true;
 					}
 				}

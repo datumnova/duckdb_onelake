@@ -390,13 +390,13 @@ TableFunction OneLakeTableEntry::GetScanFunction(ClientContext &context, unique_
 
 	// Only Delta format remains
 	auto delta_function = ResolveDeltaFunction(context);
-	
+
 	// Prioritize abfss paths for better performance with OneLake
 	auto is_abfs = [](const string &candidate) {
 		return StringUtil::StartsWith(candidate, "abfs://") || StringUtil::StartsWith(candidate, "abfss://");
 	};
 	std::stable_partition(candidate_paths.begin(), candidate_paths.end(), is_abfs);
-	
+
 	vector<string> errors;
 	for (auto &candidate : candidate_paths) {
 		try {
