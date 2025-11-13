@@ -195,7 +195,7 @@ void OneLakeTableSet::LoadEntries(ClientContext &context) {
 
 	// Get tables from the OneLake API
 	auto &credentials = onelake_catalog.GetCredentials();
-	auto tables = OneLakeAPI::GetTables(context, onelake_catalog.GetWorkspaceId(), lakehouse_id, credentials);
+	auto tables = OneLakeAPI::GetTables(context, onelake_catalog.GetWorkspaceId(), *schema.schema_data, credentials);
 	std::unordered_set<string> seen_names;
 	idx_t api_count = 0;
 	detail_endpoint_supported = true;
@@ -215,7 +215,8 @@ void OneLakeTableSet::LoadEntries(ClientContext &context) {
 				if (!table_info.has_metadata) {
 					detail_endpoint_supported = false;
 					if (!detail_endpoint_reported) {
-						Printer::Print("[onelake] table detail endpoint returned no metadata; continuing without it");
+						// Printer::Print("[onelake] table detail endpoint returned no metadata; continuing without
+						// it");
 						detail_endpoint_reported = true;
 					}
 				}

@@ -284,6 +284,17 @@ bool IsIcebergFormat(const string &format) {
 	return StringUtil::CIEquals(format, "iceberg");
 }
 
+bool IsValidAbfssPath(const string &path) {
+	return StringUtil::StartsWith(path, "abfs://") || StringUtil::StartsWith(path, "abfss://");
+}
+
+string GetAbfssPathDiagnostic(const string &path) {
+	if (IsValidAbfssPath(path)) {
+		return StringUtil::Format("Valid abfss path: %s", path);
+	}
+	return StringUtil::Format("Non-abfss path (may be slower): %s", path);
+}
+
 } // namespace
 
 OneLakeTableEntry::OneLakeTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info)
@@ -379,6 +390,13 @@ TableFunction OneLakeTableEntry::GetScanFunction(ClientContext &context, unique_
 
 	// Only Delta format remains
 	auto delta_function = ResolveDeltaFunction(context);
+
+	// Prioritize abfss paths for better performance with OneLake
+	auto is_abfs = [](const string &candidate) {
+		return StringUtil::StartsWith(candidate, "abfs://") || StringUtil::StartsWith(candidate, "abfss://");
+	};
+	std::stable_partition(candidate_paths.begin(), candidate_paths.end(), is_abfs);
+
 	vector<string> errors;
 	for (auto &candidate : candidate_paths) {
 		try {
@@ -390,7 +408,8 @@ TableFunction OneLakeTableEntry::GetScanFunction(ClientContext &context, unique_
 			bind_data = std::move(delta_bind);
 			return delta_function;
 		} catch (const Exception &ex) {
-			errors.push_back(StringUtil::Format("%s (path=%s)", ex.what(), candidate));
+			string path_info = GetAbfssPathDiagnostic(candidate);
+			errors.push_back(StringUtil::Format("%s (%s)", ex.what(), path_info));
 		}
 	}
 
