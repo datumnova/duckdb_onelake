@@ -20,7 +20,7 @@ The DuckDB OneLake extension enables seamless integration between DuckDB and Mic
 - **Multiple Authentication Methods**: Service Principal credentials, Azure CLI authentication, and credential chains
 - **Workspace and Lakehouse Management**: Connect to multiple workspaces and lakehouses within a single DuckDB session  
 - **Multi-Format Support**: Native integration with both Delta Lake and Apache Iceberg formats
-- **Schema Discovery**: Automatic discovery of lakehouses (as schemas) and tables within workspaces
+- **Schema Discovery**: Automatic discovery of lakehouses  and tables within workspaces
 - **Advanced Query Syntax**: Support for explicit format specification with `USING ICEBERG` syntax
 - **Secure Access**: Full integration with Azure Active Directory for secure data access
 
@@ -228,23 +228,13 @@ static unique_ptr<BaseSecret> CreateOneLakeSecretFunction(ClientContext &context
 
 The attachment process establishes the connection between DuckDB and a specific OneLake workspace, creating a catalog that maps workspaces to databases and lakehouses to schemas.
 
-### Attachment Syntax Options
+### Attachment Syntax
 
 ```sql
--- Option 1: Workspace ID with default lakehouse
-ATTACH 'onelake://workspace-guid' 
-    AS my_onelake 
-    (TYPE ONELAKE, DEFAULT_LAKEHOUSE 'lakehouse-name');
-
--- Option 2: Workspace and lakehouse names (resolved automatically)
+-- Required format: workspace-name/lakehouse-name.Lakehouse
 ATTACH 'workspace-name/lakehouse-name.Lakehouse' 
     AS my_onelake 
     (TYPE ONELAKE);
-
--- Option 3: Workspace name only
-ATTACH 'workspace-name' 
-    AS my_onelake 
-    (TYPE ONELAKE, DEFAULT_LAKEHOUSE 'lakehouse-name');
 ```
 
 ### Attachment Flow
@@ -257,10 +247,10 @@ sequenceDiagram
     participant API as OneLake API
     participant Catalog as OneLakeCatalog
     
-    Client->>Storage: ATTACH 'workspace/lakehouse'
+    Client->>Storage: ATTACH 'workspace/lakehouse.Lakehouse'
     Storage->>Storage: ParseAttachTarget()
     
-    Note over Storage: Extract workspace_token and lakehouse_token
+    Note over Storage: Extract workspace_token and lakehouse_token (both required)
     
     Storage->>SecretMgr: LookupSecret("onelake://workspace")
     SecretMgr-->>Storage: OneLakeCredentials
@@ -275,16 +265,17 @@ sequenceDiagram
 The attachment process begins in the `AttachInternal` method:
 
 ```cpp
-// From: src/storage/onelake_storage_extension.cpp:235-260
+// Simplified AttachInternal method - requires workspace/lakehouse.Lakehouse format
 unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(
     optional_ptr<StorageExtensionInfo> storage_info,
     ClientContext &context, AttachedDatabase &db,
     const string &name, AttachInfo &info,
     AttachOptions &attach_options) {
     
-    // Parse the attachment target to extract workspace and optional lakehouse
+    // Parse workspace and lakehouse from ATTACH target (required format)
     auto parsed_target = ParseAttachTarget(info.path.empty() ? name : info.path);
     string workspace_token = parsed_target.workspace_token;
+    string default_lakehouse = parsed_target.lakehouse_token;
     
     // Look up appropriate secret based on workspace
     auto &secret_manager = SecretManager::Get(context);
@@ -299,42 +290,36 @@ unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(
     OneLakeWorkspace resolved_workspace = ResolveWorkspace(context, credentials, workspace_token);
     
     return make_uniq<OneLakeCatalog>(db, resolved_workspace.id, name, 
-                                     std::move(credentials), default_lakehouse);
+                                     std::move(credentials), std::move(default_lakehouse));
 }
 ```
 
 ### Target Parsing Logic
 
-The extension supports flexible attachment targets through the `ParseAttachTarget` function:
+The extension requires a specific attachment format through the `ParseAttachTarget` function:
 
 ```cpp
-// From: src/storage/onelake_storage_extension.cpp:70-120
+// Simplified ParseAttachTarget - requires workspace/lakehouse.Lakehouse format
 static ParsedAttachTarget ParseAttachTarget(const string &raw_identifier) {
-    string working = raw_identifier;
-    
-    // Remove optional onelake:// prefix
-    const string scope_prefix = "onelake://";
-    if (StringUtil::StartsWith(working, scope_prefix)) {
-        working = working.substr(scope_prefix.size());
-    }
-    
-    // Parse workspace[/lakehouse] format
+    // Validate the required format: workspace-name/lakehouse-name.Lakehouse
     auto slash_pos = working.find('/');
-    string workspace_part = working;
-    string remainder;
-    
-    if (slash_pos != string::npos) {
-        workspace_part = working.substr(0, slash_pos);
-        remainder = working.substr(slash_pos + 1);
-        
-        // Normalize lakehouse name (remove .Lakehouse suffix if present)
-        if (!remainder.empty()) {
-            result.lakehouse_token = NormalizeLakehouseToken(remainder);
-            result.has_lakehouse = true;
-        }
+    if (slash_pos == string::npos) {
+        throw InvalidInputException("OneLake ATTACH path must be in format 'workspace-name/lakehouse-name.Lakehouse'");
     }
     
+    string workspace_part = working.substr(0, slash_pos);
+    string lakehouse_part = working.substr(slash_pos + 1);
+    
+    // Validate no additional path segments
+    if (lakehouse_part.find('/') != string::npos) {
+        throw InvalidInputException("OneLake ATTACH path must be in format 'workspace-name/lakehouse-name.Lakehouse'");
+    }
+    
+    // Normalize lakehouse name (remove .Lakehouse suffix if present)
     result.workspace_token = workspace_part;
+    result.lakehouse_token = NormalizeLakehouseToken(lakehouse_part);
+    result.has_lakehouse = true;
+    
     return result;
 }
 ```

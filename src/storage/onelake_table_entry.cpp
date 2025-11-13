@@ -67,7 +67,8 @@ string JoinPath(const string &lhs, const string &rhs) {
 	return lhs + rhs;
 }
 
-vector<string> BuildRelativePaths(const string &raw_location, const string &table_name) {
+vector<string> BuildRelativePaths(const string &raw_location, const string &table_name,
+                                  const OneLakeSchemaEntry &schema_entry) {
 	vector<string> result;
 	auto normalized = TrimLeadingSlashes(NormalizeSlashes(raw_location));
 	if (!normalized.empty()) {
@@ -76,11 +77,22 @@ vector<string> BuildRelativePaths(const string &raw_location, const string &tabl
 
 	vector<string> parts = StringUtil::Split(table_name, '.');
 	string default_relative;
-	if (parts.empty()) {
-		default_relative = "Tables/" + table_name;
+	if (schema_entry.schema_data && schema_entry.schema_data->schema_enabled) {
+		// For schema-enabled lakehouses, tables are under Schemas/{schema_name}/Tables/
+		if (parts.empty()) {
+			default_relative = "Schemas/" + schema_entry.name + "/Tables/" + table_name;
+		} else {
+			default_relative = "Schemas/" + schema_entry.name + "/Tables/" +
+			                   StringUtil::Join(parts, parts.size(), "/", [](const string &entry) { return entry; });
+		}
 	} else {
-		default_relative =
-		    "Tables/" + StringUtil::Join(parts, parts.size(), "/", [](const string &entry) { return entry; });
+		// For regular lakehouses, tables are under Tables/
+		if (parts.empty()) {
+			default_relative = "Tables/" + table_name;
+		} else {
+			default_relative =
+			    "Tables/" + StringUtil::Join(parts, parts.size(), "/", [](const string &entry) { return entry; });
+		}
 	}
 	if (std::find(result.begin(), result.end(), default_relative) == result.end()) {
 		result.push_back(default_relative);
@@ -160,7 +172,7 @@ vector<string> BuildLocationCandidates(const OneLakeCatalog &catalog, const OneL
 		return candidates;
 	}
 
-	auto relative_paths = BuildRelativePaths(normalized, table_entry.name);
+	auto relative_paths = BuildRelativePaths(normalized, table_entry.name, schema_entry);
 	const string &workspace_id = catalog.GetWorkspaceId();
 	vector<string> prefixes;
 	std::unordered_set<string> prefix_seen;

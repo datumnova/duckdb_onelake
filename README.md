@@ -6,7 +6,7 @@ This repository is based on https://github.com/duckdb/extension-template, check 
 
 This extension, Onelake, allow you to connect DuckDB to OneLake workspaces and lakehouses, enabling you to query data stored in OneLake directly from DuckDB.
 
-DISCLAIMER: Currently, this extension is in an experimental phase and only supports reading Delta and Iceberg tables in lakehouses created without schema.
+DISCLAIMER: Currently, this extension is in an experimental phase..
 
 ## Features
 - Authentication using:
@@ -15,7 +15,7 @@ DISCLAIMER: Currently, this extension is in an experimental phase and only suppo
     - Credentials picked up from the Azure CLI logged in user.
 - Connect to OneLake workspaces and lakehouses.
 - Attach multiple lakehouses from the same OneLake workspace.
-- Set a default lakehouse for queries as a schema.
+- Set a default lakehouse.schema for queries .
 - Query Delta and Iceberg tables stored in OneLake lakehouses with SQL syntax.
 
 ### Current Limitations
@@ -77,16 +77,12 @@ CREATE SECRET onelake (
 --     CHAIN 'cli'
 -- );
 
-ATTACH 'onelake://<your_workspace_id>'
-      AS <your_connection_name>
-      (TYPE ONELAKE, DEFAULT_LAKEHOUSE '<your_lakehouse_id_or_name>');
-
--- Alternatively, provide workspace and lakehouse names and let the extension resolve them:
+-- Required format: workspace-name/lakehouse-name.Lakehouse
 ATTACH '<your_workspace_name>/<your_lakehouse_name>.Lakehouse'
     AS <your_connection_name>
     (TYPE ONELAKE);
 
-USE <your_connection_name>;
+USE <your_connection_name>.<schema_name>;
 
 SHOW TABLES;
 

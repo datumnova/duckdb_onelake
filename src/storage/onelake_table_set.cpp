@@ -72,7 +72,13 @@ vector<string> BuildTableRootCandidates(const OneLakeCatalog &catalog, const One
 		const auto &lakehouse_id = schema_entry.schema_data->id;
 		const auto &lakehouse_name = schema_entry.schema_data->name;
 		if (!lakehouse_id.empty()) {
-			add_candidate(base_prefix + "/" + lakehouse_id + "/Tables");
+			if (schema_entry.schema_data->schema_enabled) {
+				// For schema-enabled lakehouses, tables are under /Schemas/{schema_name}/Tables/
+				add_candidate(base_prefix + "/" + lakehouse_id + "/Schemas/" + schema_entry.name + "/Tables");
+			} else {
+				// For regular lakehouses, tables are under /Tables/
+				add_candidate(base_prefix + "/" + lakehouse_id + "/Tables");
+			}
 		}
 	}
 
@@ -89,7 +95,11 @@ void AddDiscoveredTable(OneLakeCatalog &catalog, OneLakeSchemaEntry &schema, One
 	if (!relative_location.empty()) {
 		table_entry->table_data->location = relative_location;
 	} else {
-		table_entry->table_data->location = "Tables/" + table_name;
+		if (schema.schema_data && schema.schema_data->schema_enabled) {
+			table_entry->table_data->location = "Schemas/" + schema.name + "/Tables/" + table_name;
+		} else {
+			table_entry->table_data->location = "Tables/" + table_name;
+		}
 	}
 	table_set.CreateEntry(std::move(table_entry));
 }
@@ -161,7 +171,12 @@ idx_t DiscoverTablesFromStorage(ClientContext &context, OneLakeCatalog &catalog,
 				continue;
 			}
 			string detected_format = has_delta_log ? "Delta" : "iceberg";
-			string relative_location = "Tables/" + leaf;
+			string relative_location;
+			if (schema.schema_data && schema.schema_data->schema_enabled) {
+				relative_location = "Schemas/" + schema.name + "/Tables/" + leaf;
+			} else {
+				relative_location = "Tables/" + leaf;
+			}
 			AddDiscoveredTable(catalog, schema, table_set, leaf, detected_format, relative_location);
 			discovered++;
 			// Printer::Print(
@@ -202,6 +217,12 @@ void OneLakeTableSet::LoadEntries(ClientContext &context) {
 	detail_endpoint_reported = false;
 
 	for (auto &table : tables) {
+		// For schema-enabled lakehouses, filter tables by current schema
+		if (schema.schema_data->schema_enabled && !table.schema_name.empty()) {
+			if (table.schema_name != schema.name) {
+				continue; // Skip tables from other schemas
+			}
+		}
 		CreateTableInfo info;
 		info.table = table.name;
 		auto table_entry = make_uniq<OneLakeTableEntry>(catalog, schema, info);
@@ -241,7 +262,11 @@ void OneLakeTableSet::LoadEntries(ClientContext &context) {
 			table_entry->SetPartitionColumns(table_info.partition_columns);
 		}
 		if (table_entry->table_data->location.empty()) {
-			table_entry->table_data->location = "Tables/" + table.name;
+			if (schema.schema_data && schema.schema_data->schema_enabled) {
+				table_entry->table_data->location = "Schemas/" + schema.name + "/Tables/" + table.name;
+			} else {
+				table_entry->table_data->location = "Tables/" + table.name;
+			}
 		}
 
 		const auto resolved_location = table_entry->table_data->location;
@@ -367,7 +392,11 @@ unique_ptr<OneLakeTableInfo> OneLakeTableSet::GetTableInfo(ClientContext &contex
 		table_info->partition_columns = table_info_api.partition_columns;
 	}
 	if (table_info->location.empty()) {
-		table_info->location = "Tables/" + table_name;
+		if (schema.schema_data && schema.schema_data->schema_enabled) {
+			table_info->location = "Schemas/" + schema.name + "/Tables/" + table_name;
+		} else {
+			table_info->location = "Tables/" + table_name;
+		}
 	}
 
 	// Attempt to hydrate the column definitions by binding through the OneLake table entry logic

@@ -88,33 +88,47 @@ void OneLakeSchemaSet::LoadEntries(ClientContext &context) {
 	for (const auto &lakehouse : lakehouses) {
 		available_lakehouses.push_back(lakehouse.name);
 
-		if (has_configured_default && !LakehouseMatchesPreference(lakehouse, configured_default)) {
+		// With Option 3 format, we should only process the specific lakehouse mentioned in the attach path
+		if (!LakehouseMatchesPreference(lakehouse, configured_default)) {
 			continue;
 		}
 
-		CreateSchemaInfo info;
-		info.schema = lakehouse.name;
-		info.internal = IsInternalLakehouse(lakehouse.name);
-		auto schema_entry = make_uniq<OneLakeSchemaEntry>(catalog, info);
-		schema_entry->schema_data = make_uniq<OneLakeLakehouse>(lakehouse);
-		auto created_entry = CreateEntry(std::move(schema_entry));
-		// if (created_entry) {
-		// 	Printer::Print(StringUtil::Format("[onelake] registered lakehouse '%s' (id=%s)", lakehouse.name,
-		// 	                                  lakehouse.id.empty() ? "<unknown>" : lakehouse.id));
-		// }
+		if (lakehouse.schema_enabled) {
+			// For schema-enabled lakehouses, create a schema entry for each schema within the lakehouse
+			auto schemas = OneLakeAPI::GetSchemas(context, onelake_catalog.GetWorkspaceId(), lakehouse.id,
+			                                      lakehouse.name, onelake_catalog.GetCredentials());
+			for (const auto &schema : schemas) {
+				CreateSchemaInfo info;
+				info.schema = schema.name;
+				info.internal = IsInternalLakehouse(schema.name);
+				auto schema_entry = make_uniq<OneLakeSchemaEntry>(catalog, info);
+				schema_entry->schema_data = make_uniq<OneLakeLakehouse>(lakehouse);
+				auto created_entry = CreateEntry(std::move(schema_entry));
 
-		if (has_configured_default) {
-			onelake_catalog.SetDefaultSchema(lakehouse.name);
+				if (!onelake_catalog.HasDefaultSchema()) {
+					onelake_catalog.SetDefaultSchema(schema.name);
+				}
+			}
+			matched_configured_default = true;
+			break;
+		} else {
+			// For non-schema-enabled lakehouses, create a single "default" schema
+			CreateSchemaInfo info;
+			info.schema = "default";
+			info.internal = IsInternalLakehouse(lakehouse.name);
+			auto schema_entry = make_uniq<OneLakeSchemaEntry>(catalog, info);
+			schema_entry->schema_data = make_uniq<OneLakeLakehouse>(lakehouse);
+			auto created_entry = CreateEntry(std::move(schema_entry));
+
+			if (!onelake_catalog.HasDefaultSchema()) {
+				onelake_catalog.SetDefaultSchema("default");
+			}
 			matched_configured_default = true;
 			break;
 		}
-
-		if (!has_configured_default && !onelake_catalog.HasDefaultSchema()) {
-			onelake_catalog.SetDefaultSchema(lakehouse.name);
-		}
 	}
 
-	if (has_configured_default && !matched_configured_default) {
+	if (!matched_configured_default) {
 		string available;
 		if (available_lakehouses.empty()) {
 			available = "<none>";
@@ -123,10 +137,6 @@ void OneLakeSchemaSet::LoadEntries(ClientContext &context) {
 		}
 		throw InvalidInputException("Lakehouse '%s' not found in workspace '%s'. Available lakehouses: %s",
 		                            configured_default, onelake_catalog.GetWorkspaceId(), available);
-	}
-
-	if (!has_configured_default && !lakehouses.empty() && !onelake_catalog.HasDefaultSchema()) {
-		onelake_catalog.SetDefaultSchema(lakehouses.front().name);
 	}
 }
 

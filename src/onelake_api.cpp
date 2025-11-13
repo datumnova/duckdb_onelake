@@ -544,9 +544,9 @@ vector<OneLakeTable> OneLakeAPI::GetTables(ClientContext &context, const string 
 		auto schema_tables =
 		    GetTablesFromSchema(context, workspace_id, lakehouse.id, lakehouse.name, schema.name, credentials);
 
-		// For schema-enabled lakehouses, prefix table names with schema name
+		// For schema-enabled lakehouses, preserve original table names and store schema info
 		for (auto &table : schema_tables) {
-			table.name = schema.name + "__" + table.name;
+			table.schema_name = schema.name;
 			all_tables.push_back(std::move(table));
 		}
 	}
