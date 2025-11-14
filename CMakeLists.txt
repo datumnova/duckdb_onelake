@@ -5,14 +5,6 @@ set(TARGET_NAME onelake)
 
 set(CURL_LIBRARY "-lcurl")
 set(CURL_INCLUDE_DIR "/usr/include/curl")
-set(VCPKG_TARGET_ARCHITECTURE x64)
-set(VCPKG_CRT_LINKAGE dynamic)
-set(VCPKG_LIBRARY_LINKAGE static)
-
-set(VCPKG_BUILD_TYPE release)
-
-# Configure Azure SDK to use curl instead of WinHTTP
-set(VCPKG_CMAKE_CONFIGURE_OPTIONS "-DBUILD_TRANSPORT_WINHTTP=OFF" "-DBUILD_TRANSPORT_CURL=ON")
 
 # Hint CMake to the bundled vcpkg installation when the toolchain isn't providing jsoncpp.
 if(NOT DEFINED jsoncpp_DIR)
