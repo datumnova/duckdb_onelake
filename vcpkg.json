@@ -3,11 +3,7 @@
                 "openssl",
                 "curl",
                 "jsoncpp",
-                "azure-identity-cpp",   
-                {
-                        "name": "azure-core-cpp",
-                        "features": ["curl"]
-                }
+                "azure-identity-cpp"
         ],
         "vcpkg-configuration": {
                 "overlay-ports": [
