@@ -3,10 +3,7 @@
                 "openssl",
                 "curl",
                 "jsoncpp",
-                {
-                        "name": "azure-identity-cpp",
-                        "features": ["curl"]
-                },
+                "azure-identity-cpp",   
                 {
                         "name": "azure-core-cpp",
                         "features": ["curl"]
