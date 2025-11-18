@@ -1,4 +1,7 @@
 {
+        "name": "duckdb-onelake",
+        "version-string": "0.1.0",
+        "builtin-baseline": "d1ff36c6520ee43f1a656c03cd6425c2974a449e",
         "dependencies": [
                 "openssl",
                 "curl",

@@ -23,13 +23,7 @@ include_directories(src/include)
 find_package(OpenSSL REQUIRED)
 find_package(CURL REQUIRED)
 find_package(jsoncpp REQUIRED)
-find_package(azure-identity-cpp CONFIG)
-
-if(NOT ${azure-identity-cpp_FOUND}
-   OR NOT ${azure-storage-blobs-cpp_FOUND}
-   OR NOT ${azure-storage-files-datalake-cpp_FOUND})
-  message(FATAL_ERROR "Azure SDK not found, did you set up vcpkg correctly?")
-endif()
+find_package(azure-identity-cpp CONFIG REQUIRED)
 
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
@@ -51,8 +45,7 @@ set(EXTENSION_SOURCES
     src/storage/onelake_transaction_manager.cpp
     src/storage/onelake_transaction.cpp
 )
-add_library(${EXTENSION_NAME} STATIC ${EXTENSION_SOURCES})
-set(PARAMETERS "-warnings")
+
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
