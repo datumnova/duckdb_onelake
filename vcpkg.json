@@ -1,16 +1,21 @@
 {
-        "dependencies": [
-                "openssl",
-                "curl",
-                "jsoncpp",
-                "azure-identity-cpp"
-        ],
-        "vcpkg-configuration": {
-                "overlay-ports": [
-                        "./extension-ci-tools/vcpkg_ports"
-                ],
-                "overlay-triplets": [
-                        "./extension-ci-tools/toolchains"
-                ]
-        }
+  "dependencies": [
+    "vcpkg-cmake",
+    "openssl",
+    "curl",
+    "jsoncpp",
+    "azure-identity-cpp",
+    {
+      "name": "azure-core-cpp",
+      "features": ["curl"]
+    }
+  ],
+  "vcpkg-configuration": {
+    "overlay-ports": [
+      "./extension-ci-tools/vcpkg_ports"
+    ],
+    "overlay-triplets": [
+      "./extension-ci-tools/toolchains"
+    ]
+  }
 }

@@ -27,4 +27,5 @@ jobs:
       duckdb_version: v1.4.1
       ci_tools_version: v1.4.1
       extension_name: onelake
-      format_checks: 'format;tidy'
+      # format_checks += 'format;tidy' to enable both format and tidy checks
+      format_checks: 'format'

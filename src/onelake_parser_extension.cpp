@@ -21,7 +21,6 @@ namespace {
 
 const string ONELAKE_TABLES_PATH_SEGMENT = "/Tables/";
 
-// Shared helper for constructing ABFSS path
 string BuildAbfssPath(const string &workspace_id, const string &lakehouse_id, const string &table_name) {
 	return "abfss://" + workspace_id + "@onelake.dfs.fabric.microsoft.com/" + lakehouse_id +
 	       ONELAKE_TABLES_PATH_SEGMENT + table_name;
@@ -70,10 +69,7 @@ bool TryParseQualifiedName(const string &input, OneLakeIcebergParseData &out) {
 	}
 	for (auto &part : parts) {
 		StringUtil::Trim(part);
-		if (part.empty()) {
-			return false;
-		}
-		if (std::any_of(part.begin(), part.end(), [](unsigned char c) { return std::isspace(c); })) {
+		if (part.empty() || std::any_of(part.begin(), part.end(), [](unsigned char c) { return std::isspace(c); })) {
 			return false;
 		}
 	}
@@ -151,26 +147,20 @@ ParserExtensionPlanResult OneLakeUsingIcebergPlan(ParserExtensionInfo *, ClientC
 	auto &onelake_catalog = static_cast<OneLakeCatalog &>(onelake_table.ParentCatalog());
 	auto &schema_entry = static_cast<OneLakeSchemaEntry &>(onelake_table.ParentSchema());
 
-	// Get workspace ID from catalog
 	auto workspace_id = onelake_catalog.GetWorkspaceId();
 	if (workspace_id.empty()) {
 		throw InvalidInputException("Unable to resolve OneLake workspace identifier for Iceberg scan");
 	}
 
-	// Get lakehouse ID from schema
-	string lakehouse_id;
-	if (schema_entry.schema_data && !schema_entry.schema_data->id.empty()) {
-		lakehouse_id = schema_entry.schema_data->id;
-	} else if (schema_entry.schema_data && !schema_entry.schema_data->name.empty()) {
-		lakehouse_id = schema_entry.schema_data->name;
-	} else {
-		lakehouse_id = schema_entry.name;
-	}
+	string lakehouse_id =
+	    schema_entry.schema_data && !schema_entry.schema_data->id.empty()
+	        ? schema_entry.schema_data->id
+	        : (schema_entry.schema_data && !schema_entry.schema_data->name.empty() ? schema_entry.schema_data->name
+	                                                                               : schema_entry.name);
 	if (lakehouse_id.empty()) {
 		throw InvalidInputException("Unable to resolve OneLake lakehouse identifier for Iceberg scan");
 	}
 
-	// Construct proper ABFSS path using shared helper
 	string path = BuildAbfssPath(workspace_id, lakehouse_id, iceberg_data.table);
 
 	ParserExtensionPlanResult result;

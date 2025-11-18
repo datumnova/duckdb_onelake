@@ -31,6 +31,27 @@ CREATE SECRET onelake (
     CLIENT_SECRET 'AZURE_CLIENT_SECRET'
 );
 
+#statement ok
+#SET onelake_env_token_variable='CUSTOM_STORAGE_TOKEN';
+
+#statement ok
+#SET VARIABLE AZURE_STORAGE_TOKEN='unit-test-storage-token';
+
+#statement ok
+#CREATE SECRET onelake_env_chain (
+#    TYPE ONELAKE,
+#    PROVIDER credential_chain,
+#    CHAIN 'cli, env'
+#);
+
+#statement ok
+#CREATE SECRET onelake_env_only (
+#    TYPE ONELAKE,
+#    PROVIDER credential_chain,
+#    CHAIN 'env'
+#);
+
+
 statement ok
 ATTACH 'your_workspace_name/your_lakehouse_name.Lakehouse'
       AS your_connection_name

@@ -1,9 +1,11 @@
 #include "onelake_api.hpp"
+#include "onelake_logging.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/interval.hpp"
+#include "onelake_secret.hpp"
 #include <azure/core/context.hpp>
 #include <azure/core/credentials/credentials.hpp>
 #include <azure/identity/default_azure_credential.hpp>
@@ -12,7 +14,7 @@
 #include <unordered_set>
 #include <memory>
 #include <chrono>
-#include <iostream>
+#include <cstdlib>
 
 namespace duckdb {
 
@@ -23,6 +25,20 @@ static size_t WriteCallback(void *contents, size_t size, size_t nmemb, string *u
 }
 
 namespace {
+
+string UrlEncode(const string &value) {
+	CURL *curl = curl_easy_init();
+	string result = value;
+	if (curl) {
+		char *escaped = curl_easy_escape(curl, value.c_str(), static_cast<int>(value.size()));
+		if (escaped) {
+			result = string(escaped);
+			curl_free(escaped);
+		}
+		curl_easy_cleanup(curl);
+	}
+	return result;
+}
 
 struct AbfssPathComponents {
 	string container;
@@ -98,12 +114,140 @@ string ComposeLeaf(const string &base_path, const string &full_name) {
 	return full_name;
 }
 
+string ReadEnvTokenValue(ClientContext *context, const string &variable_name) {
+	if (variable_name.empty()) {
+		ONELAKE_LOG_DEBUG(context, "[credentials] Skipping environment lookup because variable name is empty");
+		return string();
+	}
+	auto token = ResolveTokenFromContextOrEnv(context, variable_name);
+	if (token.empty()) {
+		ONELAKE_LOG_DEBUG(context, "[credentials] Environment variable '%s' is not defined", variable_name.c_str());
+		return string();
+	}
+	ONELAKE_LOG_DEBUG(context, "[credentials] Retrieved token from '%s' (length=%llu)", variable_name.c_str(),
+	                  static_cast<long long>(token.size()));
+	return token;
+}
+
+string AcquireTokenViaAzureCli(ClientContext *context, const string &scope, OneLakeCredentials &credentials) {
+	try {
+		ONELAKE_LOG_INFO(context, "[credentials] Attempting Azure CLI token acquisition for scope '%s'", scope.c_str());
+		auto credential = std::make_shared<Azure::Identity::DefaultAzureCredential>();
+		Azure::Core::Credentials::TokenRequestContext request_context;
+		request_context.Scopes = {scope};
+		Azure::Core::Context azure_context;
+		auto access_token_result = credential->GetToken(request_context, azure_context);
+		auto access_token = access_token_result.Token;
+		auto expires_on = access_token_result.ExpiresOn.time_since_epoch();
+		auto expires_microseconds = std::chrono::duration_cast<std::chrono::microseconds>(expires_on).count();
+		auto expiry = Timestamp::FromEpochMicroSeconds(expires_microseconds);
+
+		OneLakeCredentials::TokenCacheEntry entry;
+		entry.token = access_token;
+		entry.expiry = expiry;
+		credentials.token_cache[scope] = entry;
+		auto now = Timestamp::GetCurrentTimestamp();
+		auto expiry_micros = Timestamp::GetEpochMicroSeconds(entry.expiry);
+		auto now_micros = Timestamp::GetEpochMicroSeconds(now);
+		auto delta_micros = expiry_micros - now_micros;
+		ONELAKE_LOG_INFO(context, "[credentials] Azure CLI token acquired (scope='%s', expires_in=%lld sec)",
+		                 scope.c_str(), static_cast<long long>(delta_micros / Interval::MICROS_PER_SEC));
+
+		return access_token;
+	} catch (const std::exception &ex) {
+		ONELAKE_LOG_ERROR(context, "[credentials] Azure CLI token acquisition failed: %s", ex.what());
+		throw IOException("Failed to obtain OneLake access token via Azure CLI credentials: %s", ex.what());
+	}
+}
+
+const char *AudienceLabel(OneLakeTokenAudience audience) {
+	switch (audience) {
+	case OneLakeTokenAudience::Fabric:
+		return "fabric";
+	case OneLakeTokenAudience::OneLakeDfs:
+		return "dfs";
+	default:
+		return "fabric";
+	}
+}
+
+string AcquireTokenViaCredentialChain(ClientContext *context, OneLakeTokenAudience audience, const string &scope,
+                                      OneLakeCredentials &credentials) {
+	auto chain_steps = ParseOneLakeCredentialChain(credentials.credential_chain);
+	if (chain_steps.empty()) {
+		chain_steps.emplace_back("cli");
+	}
+	string last_error = "No credential providers succeeded";
+	ONELAKE_LOG_INFO(context, "[credentials] Executing chain '%s' for %s scope '%s'",
+	                 credentials.credential_chain.c_str(), AudienceLabel(audience), scope.c_str());
+	for (auto &step : chain_steps) {
+		ONELAKE_LOG_DEBUG(context, "[credentials] Trying chain step '%s'", step.c_str());
+		if (step == "env") {
+			vector<string> env_candidates;
+			auto add_candidate = [&](const string &configured_value, const char *fallback) {
+				string candidate = configured_value.empty() ? string(fallback ? fallback : "") : configured_value;
+				if (candidate.empty()) {
+					return;
+				}
+				if (std::find(env_candidates.begin(), env_candidates.end(), candidate) != env_candidates.end()) {
+					return;
+				}
+				env_candidates.push_back(candidate);
+			};
+			switch (audience) {
+			case OneLakeTokenAudience::Fabric:
+				add_candidate(credentials.env_fabric_variable, ONELAKE_DEFAULT_ENV_FABRIC_TOKEN_VARIABLE);
+				add_candidate(credentials.env_storage_variable, ONELAKE_DEFAULT_ENV_STORAGE_TOKEN_VARIABLE);
+				break;
+			case OneLakeTokenAudience::OneLakeDfs:
+				add_candidate(credentials.env_storage_variable, ONELAKE_DEFAULT_ENV_STORAGE_TOKEN_VARIABLE);
+				add_candidate(credentials.env_fabric_variable, ONELAKE_DEFAULT_ENV_FABRIC_TOKEN_VARIABLE);
+				break;
+			default:
+				break;
+			}
+			if (env_candidates.empty()) {
+				last_error = "No environment variables configured for credential chain";
+				continue;
+			}
+			ONELAKE_LOG_DEBUG(context, "[credentials] Env candidates for %s scope: %s", AudienceLabel(audience),
+			                  StringUtil::Join(env_candidates, ", ").c_str());
+			for (auto &variable : env_candidates) {
+				auto env_token = ReadEnvTokenValue(context, variable);
+				if (!env_token.empty()) {
+					ONELAKE_LOG_INFO(context, "[credentials] Using token from '%s' for %s scope", variable.c_str(),
+					                 AudienceLabel(audience));
+					return env_token;
+				}
+			}
+			last_error = StringUtil::Format("Environment variables %s are not set or empty",
+			                                StringUtil::Join(env_candidates, ", "));
+			continue;
+		}
+		if (step == "cli") {
+			try {
+				return AcquireTokenViaAzureCli(context, scope, credentials);
+			} catch (const std::exception &ex) {
+				last_error = ex.what();
+				ONELAKE_LOG_WARN(context, "[credentials] Azure CLI step failed: %s", ex.what());
+				continue;
+			}
+		}
+		last_error = StringUtil::Format("Unsupported credential chain step '%s'", step);
+		ONELAKE_LOG_WARN(context, "[credentials] %s", last_error.c_str());
+	}
+	throw IOException("Failed to obtain OneLake access token via Azure credential chain: %s", last_error.c_str());
+}
+
 } // namespace
 
-static const char *FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default";
-static const char *DFS_SCOPE = "https://storage.azure.com/.default";
+namespace {
+const char *FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default";
+const char *DFS_SCOPE = "https://storage.azure.com/.default";
+const char *FABRIC_API_BASE = "https://api.fabric.microsoft.com/v1";
+const char *MICROSOFT_ENTRA_TOKEN_ENDPOINT = "https://login.microsoftonline.com";
 
-static const string &ScopeForAudience(OneLakeTokenAudience audience) {
+const string &ScopeForAudience(OneLakeTokenAudience audience) {
 	static const string fabric_scope = FABRIC_SCOPE;
 	static const string dfs_scope = DFS_SCOPE;
 	switch (audience) {
@@ -116,61 +260,45 @@ static const string &ScopeForAudience(OneLakeTokenAudience audience) {
 	}
 }
 
-string OneLakeAPI::GetAccessToken(OneLakeCredentials &credentials, OneLakeTokenAudience audience) {
+} // namespace
+
+string OneLakeAPI::GetAccessToken(ClientContext *context, OneLakeCredentials &credentials,
+                                  OneLakeTokenAudience audience) {
 	const auto &scope = ScopeForAudience(audience);
 	auto current_time = Timestamp::GetCurrentTimestamp();
 	auto cache_entry = credentials.token_cache.find(scope);
 	if (cache_entry != credentials.token_cache.end()) {
 		if (!cache_entry->second.token.empty() && current_time < cache_entry->second.expiry) {
+			ONELAKE_LOG_DEBUG(context, "[credentials] Cache hit for %s scope '%s'", AudienceLabel(audience),
+			                  scope.c_str());
 			return cache_entry->second.token;
 		}
 	}
 
 	if (credentials.provider == OneLakeCredentialProvider::CredentialChain) {
-		try {
-			auto credential = std::make_shared<Azure::Identity::DefaultAzureCredential>();
-			Azure::Core::Credentials::TokenRequestContext request_context;
-			request_context.Scopes = {scope};
-			Azure::Core::Context azure_context;
-			auto access_token_result = credential->GetToken(request_context, azure_context);
-			auto access_token = access_token_result.Token;
-			auto expires_on = access_token_result.ExpiresOn.time_since_epoch();
-			auto expires_microseconds = std::chrono::duration_cast<std::chrono::microseconds>(expires_on).count();
-			auto expiry = Timestamp::FromEpochMicroSeconds(expires_microseconds);
-
-			OneLakeCredentials::TokenCacheEntry entry;
-			entry.token = access_token;
-			entry.expiry = expiry;
-			credentials.token_cache[scope] = entry;
-
-			return access_token;
-		} catch (const std::exception &ex) {
-			throw IOException("Failed to obtain OneLake access token via Azure credential chain: %s", ex.what());
-		}
+		return AcquireTokenViaCredentialChain(context, audience, scope, credentials);
 	}
 
 	if (credentials.provider != OneLakeCredentialProvider::ServicePrincipal) {
 		throw IOException("Unsupported OneLake credential provider encountered when requesting token");
 	}
+	ONELAKE_LOG_INFO(context, "[credentials] Requesting service principal token for %s scope '%s'",
+	                 AudienceLabel(audience), scope.c_str());
 
-	CURL *curl;
-	CURLcode res;
-	string response_string;
-	string post_data;
-
-	curl = curl_easy_init();
+	CURL *curl = curl_easy_init();
 	if (!curl) {
 		throw InternalException("Failed to initialize CURL for OneLake API");
 	}
 
-	// Microsoft Entra ID token endpoint
-	string token_url = "https://login.microsoftonline.com/" + credentials.tenant_id + "/oauth2/v2.0/token";
+	string token_url = string(MICROSOFT_ENTRA_TOKEN_ENDPOINT) + "/" + credentials.tenant_id + "/oauth2/v2.0/token";
+	string response_string;
+	string post_data;
 
-	// Prepare POST data for client credentials flow
-	post_data = "grant_type=client_credentials";
-	post_data += "&client_id=" + credentials.client_id;
-	post_data += "&client_secret=" + credentials.client_secret;
-	post_data += "&scope=" + scope;
+	string encoded_client_id = UrlEncode(credentials.client_id);
+	string encoded_client_secret = UrlEncode(credentials.client_secret);
+	string encoded_scope = UrlEncode(scope);
+	post_data = "grant_type=client_credentials&client_id=" + encoded_client_id +
+	            "&client_secret=" + encoded_client_secret + "&scope=" + encoded_scope;
 
 	curl_easy_setopt(curl, CURLOPT_URL, token_url.c_str());
 	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_data.c_str());
@@ -182,7 +310,7 @@ string OneLakeAPI::GetAccessToken(OneLakeCredentials &credentials, OneLakeTokenA
 	headers = curl_slist_append(headers, "Content-Type: application/x-www-form-urlencoded");
 	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
-	res = curl_easy_perform(curl);
+	CURLcode res = curl_easy_perform(curl);
 
 	long response_code;
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
@@ -190,7 +318,10 @@ string OneLakeAPI::GetAccessToken(OneLakeCredentials &credentials, OneLakeTokenA
 	curl_slist_free_all(headers);
 	curl_easy_cleanup(curl);
 	if (res != CURLE_OK || response_code != 200) {
-		throw IOException("Failed to obtain OneLake access token: HTTP %ld", response_code);
+		auto body = response_string.empty() ? string("<empty>") : response_string;
+		ONELAKE_LOG_ERROR(context, "[credentials] Service principal token request failed (HTTP %ld) body=%s",
+		                  response_code, body.c_str());
+		throw IOException("Failed to obtain OneLake access token: HTTP %ld - %s", response_code, body.c_str());
 	}
 
 	// Parse JSON response to get access token
@@ -222,17 +353,18 @@ string OneLakeAPI::GetAccessToken(OneLakeCredentials &credentials, OneLakeTokenA
 		entry.expiry = expiry;
 		credentials.token_cache[scope] = entry;
 
+		ONELAKE_LOG_INFO(context, "[credentials] Obtained service principal token for scope '%s' (expires_in=%lld sec)",
+		                 scope.c_str(), static_cast<long long>(expires_in_seconds));
 		return access_token;
 	} catch (const std::exception &e) {
+		ONELAKE_LOG_ERROR(context, "[credentials] Failed to parse token response: %s", e.what());
 		throw InvalidInputException("Failed to parse token response: %s", e.what());
 	}
 }
 
 string OneLakeAPI::MakeAPIRequest(ClientContext &context, const string &url, OneLakeCredentials &credentials,
                                   bool allow_not_found) {
-	(void)context;
-
-	string access_token = GetAccessToken(credentials, OneLakeTokenAudience::Fabric);
+	string access_token = GetAccessToken(&context, credentials, OneLakeTokenAudience::Fabric);
 
 	CURL *curl;
 	CURLcode res;
@@ -243,6 +375,7 @@ string OneLakeAPI::MakeAPIRequest(ClientContext &context, const string &url, One
 		throw InternalException("Failed to initialize CURL for OneLake API");
 	}
 
+	ONELAKE_LOG_DEBUG(&context, "[api] GET %s (allow_not_found=%s)", url.c_str(), allow_not_found ? "true" : "false");
 	curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
 	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_string);
@@ -258,10 +391,12 @@ string OneLakeAPI::MakeAPIRequest(ClientContext &context, const string &url, One
 
 	long response_code;
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+	ONELAKE_LOG_DEBUG(&context, "[api] Response HTTP %ld (%zu bytes)", response_code, response_string.size());
 
 	curl_slist_free_all(headers);
 	curl_easy_cleanup(curl);
 	if (res != CURLE_OK) {
+		ONELAKE_LOG_ERROR(&context, "[api] Request failed: %s", curl_easy_strerror(res));
 		throw IOException("OneLake API request failed: %s", curl_easy_strerror(res));
 	}
 
@@ -269,6 +404,7 @@ string OneLakeAPI::MakeAPIRequest(ClientContext &context, const string &url, One
 		return string();
 	}
 	if (response_code < 200 || response_code >= 300) {
+		ONELAKE_LOG_WARN(&context, "[api] Non-success status %ld body=%s", response_code, response_string.c_str());
 		throw IOException("OneLake API returned error: HTTP %ld - %s", response_code, response_string.c_str());
 	}
 
@@ -276,18 +412,23 @@ string OneLakeAPI::MakeAPIRequest(ClientContext &context, const string &url, One
 }
 
 string OneLakeAPI::BuildAPIUrl(const string &workspace_id, const string &endpoint) {
-	return "https://api.fabric.microsoft.com/v1/workspaces/" + workspace_id + "/" + endpoint;
+	return string(FABRIC_API_BASE) + "/workspaces/" + workspace_id + "/" + endpoint;
 }
 
 vector<OneLakeWorkspace> OneLakeAPI::GetWorkspaces(ClientContext &context, OneLakeCredentials &credentials) {
 	vector<OneLakeWorkspace> workspaces;
 	std::unordered_set<string> visited_urls;
 	string next_url = "https://api.fabric.microsoft.com/v1/workspaces";
+	idx_t page_number = 0;
+	ONELAKE_LOG_INFO(&context, "[api] Listing OneLake workspaces");
 
 	while (!next_url.empty()) {
 		if (!visited_urls.insert(next_url).second) {
 			break;
 		}
+		page_number++;
+		ONELAKE_LOG_DEBUG(&context, "[api] Fetching workspace page %llu: %s", static_cast<long long>(page_number),
+		                  next_url.c_str());
 
 		string response = MakeAPIRequest(context, next_url, credentials);
 
@@ -352,17 +493,7 @@ vector<OneLakeWorkspace> OneLakeAPI::GetWorkspaces(ClientContext &context, OneLa
 			if (root.isMember("continuationToken") && root["continuationToken"].isString()) {
 				auto token = root["continuationToken"].asString();
 				if (!token.empty()) {
-					CURL *curl = curl_easy_init();
-					string encoded_token = token;
-					if (curl) {
-						char *escaped = curl_easy_escape(curl, token.c_str(), static_cast<int>(token.size()));
-						if (escaped) {
-							encoded_token = string(escaped);
-							curl_free(escaped);
-						}
-						curl_easy_cleanup(curl);
-					}
-					next_url = "https://api.fabric.microsoft.com/v1/workspaces?continuationToken=" + encoded_token;
+					next_url = string(FABRIC_API_BASE) + "/workspaces?continuationToken=" + UrlEncode(token);
 					continue;
 				}
 			}
@@ -373,6 +504,8 @@ vector<OneLakeWorkspace> OneLakeAPI::GetWorkspaces(ClientContext &context, OneLa
 		}
 	}
 
+	ONELAKE_LOG_INFO(&context, "[api] Workspace enumeration complete: %llu items",
+	                 static_cast<long long>(workspaces.size()));
 	return workspaces;
 }
 
@@ -382,6 +515,7 @@ vector<OneLakeLakehouse> OneLakeAPI::GetLakehouses(ClientContext &context, const
 	string response = MakeAPIRequest(context, url, credentials);
 
 	vector<OneLakeLakehouse> lakehouses;
+	ONELAKE_LOG_INFO(&context, "[api] Listing lakehouses for workspace=%s", workspace_id.c_str());
 
 	try {
 		Json::Value root;
@@ -421,6 +555,8 @@ vector<OneLakeLakehouse> OneLakeAPI::GetLakehouses(ClientContext &context, const
 		throw InvalidInputException("Failed to parse lakehouses response: %s", e.what());
 	}
 
+	ONELAKE_LOG_INFO(&context, "[api] Found %llu lakehouses in workspace=%s", static_cast<long long>(lakehouses.size()),
+	                 workspace_id.c_str());
 	return lakehouses;
 }
 
@@ -431,6 +567,9 @@ vector<OneLakeTable> OneLakeAPI::GetTables(ClientContext &context, const string 
 
 	string next_url = BuildAPIUrl(workspace_id, "lakehouses/" + lakehouse_id + "/tables");
 	std::unordered_set<string> visited_urls;
+	idx_t page_number = 0;
+	ONELAKE_LOG_INFO(&context, "[api] Listing tables for workspace=%s lakehouse=%s", workspace_id.c_str(),
+	                 lakehouse_id.c_str());
 
 	while (!next_url.empty()) {
 		if (!visited_urls.insert(next_url).second) {
@@ -438,6 +577,9 @@ vector<OneLakeTable> OneLakeAPI::GetTables(ClientContext &context, const string 
 			break;
 		}
 
+		page_number++;
+		ONELAKE_LOG_DEBUG(&context, "[api] Fetching table page %llu: %s", static_cast<long long>(page_number),
+		                  next_url.c_str());
 		string response = MakeAPIRequest(context, next_url, credentials, true);
 		if (response.empty()) {
 			break;
@@ -501,18 +643,8 @@ vector<OneLakeTable> OneLakeAPI::GetTables(ClientContext &context, const string 
 			if (root.isMember("continuationToken") && root["continuationToken"].isString()) {
 				auto token = root["continuationToken"].asString();
 				if (!token.empty()) {
-					CURL *curl = curl_easy_init();
-					string encoded_token = token;
-					if (curl) {
-						char *escaped = curl_easy_escape(curl, token.c_str(), static_cast<int>(token.size()));
-						if (escaped) {
-							encoded_token = string(escaped);
-							curl_free(escaped);
-						}
-						curl_easy_cleanup(curl);
-					}
-					next_url = BuildAPIUrl(workspace_id,
-					                       "lakehouses/" + lakehouse_id + "/tables?continuationToken=" + encoded_token);
+					next_url = BuildAPIUrl(workspace_id, "lakehouses/" + lakehouse_id +
+					                                         "/tables?continuationToken=" + UrlEncode(token));
 					continue;
 				}
 			}
@@ -523,6 +655,7 @@ vector<OneLakeTable> OneLakeAPI::GetTables(ClientContext &context, const string 
 		}
 	}
 
+	ONELAKE_LOG_INFO(&context, "[api] Table enumeration complete: %llu tables", static_cast<long long>(tables.size()));
 	return tables;
 }
 
@@ -535,12 +668,15 @@ vector<OneLakeTable> OneLakeAPI::GetTables(ClientContext &context, const string 
 
 	// For schema-enabled lakehouses, use Unity Catalog API
 	vector<OneLakeTable> all_tables;
+	ONELAKE_LOG_INFO(&context, "[api] Listing schema-enabled tables for workspace=%s lakehouse=%s",
+	                 workspace_id.c_str(), lakehouse.name.c_str());
 
 	// First get all schemas
 	auto schemas = GetSchemas(context, workspace_id, lakehouse.id, lakehouse.name, credentials);
 
 	// Then get tables from each schema
 	for (const auto &schema : schemas) {
+		ONELAKE_LOG_DEBUG(&context, "[api] Fetching tables for schema=%s", schema.name.c_str());
 		auto schema_tables =
 		    GetTablesFromSchema(context, workspace_id, lakehouse.id, lakehouse.name, schema.name, credentials);
 
@@ -551,6 +687,8 @@ vector<OneLakeTable> OneLakeAPI::GetTables(ClientContext &context, const string 
 		}
 	}
 
+	ONELAKE_LOG_INFO(&context, "[api] Schema-enabled table enumeration complete: %llu tables",
+	                 static_cast<long long>(all_tables.size()));
 	return all_tables;
 }
 
@@ -558,13 +696,15 @@ vector<OneLakeSchema> OneLakeAPI::GetSchemas(ClientContext &context, const strin
                                              const string &lakehouse_id, const string &lakehouse_name,
                                              OneLakeCredentials &credentials) {
 	vector<OneLakeSchema> schemas;
+	ONELAKE_LOG_INFO(&context, "[api] Listing schemas for workspace=%s lakehouse=%s", workspace_id.c_str(),
+	                 lakehouse_name.c_str());
 
 	// Build Unity Catalog API URL for schemas
 	string url = "https://onelake.table.fabric.microsoft.com/delta/" + workspace_id + "/" + lakehouse_id +
 	             "/api/2.1/unity-catalog/schemas?catalog_name=" + lakehouse_name + ".Lakehouse";
 
 	// Use DFS scope for Unity Catalog API
-	string access_token = GetAccessToken(credentials, OneLakeTokenAudience::OneLakeDfs);
+	string access_token = GetAccessToken(&context, credentials, OneLakeTokenAudience::OneLakeDfs);
 
 	CURL *curl = curl_easy_init();
 	if (!curl) {
@@ -629,6 +769,7 @@ vector<OneLakeSchema> OneLakeAPI::GetSchemas(ClientContext &context, const strin
 		throw InvalidInputException("Failed to parse schemas response: %s", e.what());
 	}
 
+	ONELAKE_LOG_INFO(&context, "[api] Schema enumeration complete: %llu items", static_cast<long long>(schemas.size()));
 	return schemas;
 }
 
@@ -636,6 +777,8 @@ vector<OneLakeTable> OneLakeAPI::GetTablesFromSchema(ClientContext &context, con
                                                      const string &lakehouse_id, const string &lakehouse_name,
                                                      const string &schema_name, OneLakeCredentials &credentials) {
 	vector<OneLakeTable> tables;
+	ONELAKE_LOG_INFO(&context, "[api] Listing tables for schema=%s in lakehouse=%s", schema_name.c_str(),
+	                 lakehouse_name.c_str());
 
 	// Build Unity Catalog API URL for tables in schema
 	string url = "https://onelake.table.fabric.microsoft.com/delta/" + workspace_id + "/" + lakehouse_id +
@@ -643,7 +786,7 @@ vector<OneLakeTable> OneLakeAPI::GetTablesFromSchema(ClientContext &context, con
 	             ".Lakehouse&schema_name=" + schema_name;
 
 	// Use DFS scope for Unity Catalog API
-	string access_token = GetAccessToken(credentials, OneLakeTokenAudience::OneLakeDfs);
+	string access_token = GetAccessToken(&context, credentials, OneLakeTokenAudience::OneLakeDfs);
 
 	CURL *curl = curl_easy_init();
 	if (!curl) {
@@ -737,6 +880,8 @@ vector<OneLakeTable> OneLakeAPI::GetTablesFromSchema(ClientContext &context, con
 		throw InvalidInputException("Failed to parse schema tables response: %s", e.what());
 	}
 
+	ONELAKE_LOG_INFO(&context, "[api] Schema table enumeration complete: %llu tables",
+	                 static_cast<long long>(tables.size()));
 	return tables;
 }
 
@@ -798,13 +943,13 @@ OneLakeTableInfo OneLakeAPI::GetTableInfo(ClientContext &context, const string &
 
 vector<string> OneLakeAPI::ListDirectory(ClientContext &context, const string &abfss_path,
                                          OneLakeCredentials &credentials) {
-	(void)context;
 	AbfssPathComponents components;
 	if (!ParseAbfssPath(abfss_path, components)) {
 		throw InvalidInputException("Invalid abfss path: %s", abfss_path);
 	}
+	ONELAKE_LOG_INFO(&context, "[dfs] Listing directory %s", abfss_path.c_str());
 
-	auto token = GetAccessToken(credentials, OneLakeTokenAudience::OneLakeDfs);
+	auto token = GetAccessToken(&context, credentials, OneLakeTokenAudience::OneLakeDfs);
 	CURL *curl = curl_easy_init();
 	if (!curl) {
 		throw InternalException("Failed to initialize CURL for OneLake directory listing");
@@ -842,6 +987,7 @@ vector<string> OneLakeAPI::ListDirectory(ClientContext &context, const string &a
 	CURLcode res = curl_easy_perform(curl);
 	long response_code = 0;
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+	ONELAKE_LOG_DEBUG(&context, "[dfs] HTTP %ld (%zu bytes)", response_code, response_string.size());
 
 	if (escaped_directory) {
 		curl_free(escaped_directory);
@@ -850,9 +996,11 @@ vector<string> OneLakeAPI::ListDirectory(ClientContext &context, const string &a
 	curl_easy_cleanup(curl);
 
 	if (res != CURLE_OK) {
+		ONELAKE_LOG_ERROR(&context, "[dfs] List request failed: %s", curl_easy_strerror(res));
 		throw IOException("OneLake DFS list request failed: %s", curl_easy_strerror(res));
 	}
 	if (response_code < 200 || response_code >= 300) {
+		ONELAKE_LOG_WARN(&context, "[dfs] Non-success status %ld body=%s", response_code, response_string.c_str());
 		throw IOException("OneLake DFS list returned HTTP %ld - %s", response_code, response_string.c_str());
 	}
 
@@ -889,6 +1037,8 @@ vector<string> OneLakeAPI::ListDirectory(ClientContext &context, const string &a
 		throw InvalidInputException("Failed to parse OneLake DFS list response: %s", ex.what());
 	}
 
+	ONELAKE_LOG_INFO(&context, "[dfs] Directory listing returned %llu items",
+	                 static_cast<long long>(directories.size()));
 	return directories;
 }
 

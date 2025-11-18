@@ -13,3 +13,4 @@ test/python/__pycache__/
 __pycache__/
 vcpkg_installed/
 local-test
+.github/copilot-instructions.md

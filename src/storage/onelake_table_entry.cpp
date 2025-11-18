@@ -4,6 +4,7 @@
 #include "storage/onelake_transaction.hpp"
 #include "storage/onelake_http_util.hpp"
 #include "onelake_api.hpp"
+#include "onelake_logging.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
@@ -28,8 +29,8 @@ namespace duckdb {
 
 namespace {
 
-constexpr const char *DELTA_FUNCTION_NAME = "delta_scan";
-constexpr const char *ICEBERG_FUNCTION_NAME = "iceberg_scan";
+constexpr char DELTA_FUNCTION_NAME[] = "delta_scan";
+constexpr char ICEBERG_FUNCTION_NAME[] = "iceberg_scan";
 
 bool HasScheme(const string &path) {
 	return path.find("://") != string::npos;
@@ -265,7 +266,10 @@ unique_ptr<FunctionData> BindDeltaFunction(ClientContext &context, TableFunction
 	ref.function = make_uniq<FunctionExpression>(DELTA_FUNCTION_NAME, std::move(children));
 	TableFunctionBindInput bind_input(inputs, named_parameters, input_table_types, input_table_names, nullptr, nullptr,
 	                                  delta_function, ref);
-	return delta_function.bind(context, bind_input, return_types, return_names);
+	auto delta_bind = delta_function.bind(context, bind_input, return_types, return_names);
+	ONELAKE_LOG_DEBUG(&context, "[delta] delta_scan bind succeeded for path %s with %llu columns", path.c_str(),
+	                  static_cast<long long>(return_names.size()));
+	return delta_bind;
 }
 
 unique_ptr<FunctionData> BindIcebergFunction(ClientContext &context, TableFunction &iceberg_function,
@@ -285,7 +289,10 @@ unique_ptr<FunctionData> BindIcebergFunction(ClientContext &context, TableFuncti
 	ref.function = make_uniq<FunctionExpression>(ICEBERG_FUNCTION_NAME, std::move(children));
 	TableFunctionBindInput bind_input(inputs, named_parameters, input_table_types, input_table_names, nullptr, nullptr,
 	                                  iceberg_function, ref);
-	return iceberg_function.bind(context, bind_input, return_types, return_names);
+	auto iceberg_bind = iceberg_function.bind(context, bind_input, return_types, return_names);
+	ONELAKE_LOG_DEBUG(&context, "[delta] iceberg_scan bind succeeded for path %s with %llu columns", path.c_str(),
+	                  static_cast<long long>(return_names.size()));
+	return iceberg_bind;
 }
 
 bool IsDeltaFormat(const string &format) {
@@ -334,9 +341,8 @@ void OneLakeTableEntry::SetPartitionColumns(vector<string> columns) {
 
 void OneLakeTableEntry::UpdateColumnDefinitions(const vector<string> &names, const vector<LogicalType> &types) {
 	ColumnList new_columns;
-	for (idx_t i = 0; i < types.size(); i++) {
-		ColumnDefinition column(names[i], types[i]);
-		new_columns.AddColumn(std::move(column));
+	for (idx_t i = 0; i < names.size(); i++) {
+		new_columns.AddColumn(ColumnDefinition(names[i], types[i]));
 	}
 	new_columns.Finalize();
 	columns = std::move(new_columns);
@@ -366,6 +372,7 @@ TableFunction OneLakeTableEntry::GetScanFunction(ClientContext &context, unique_
 
 	ExtensionHelper::TryAutoLoadExtension(context, "httpfs");
 	EnsureHttpBearerSecret(context, catalog, &schema_entry);
+	ONELAKE_LOG_INFO(&context, "[delta] Binding table '%s' (format=%s)", name.c_str(), table_format.c_str());
 
 	if (!IsDeltaFormat(table_format) && !IsIcebergFormat(table_format)) {
 		throw InvalidInputException("OneLake table '%s' uses unsupported format '%s'", name, table_format);
@@ -400,17 +407,18 @@ TableFunction OneLakeTableEntry::GetScanFunction(ClientContext &context, unique_
 		throw IOException("Failed to bind Iceberg scan for OneLake table '%s'. Errors: %s", name, error_summary);
 	}
 
-	// Only Delta format remains
 	auto delta_function = ResolveDeltaFunction(context);
 
-	// Prioritize abfss paths for better performance with OneLake
 	auto is_abfs = [](const string &candidate) {
 		return StringUtil::StartsWith(candidate, "abfs://") || StringUtil::StartsWith(candidate, "abfss://");
 	};
 	std::stable_partition(candidate_paths.begin(), candidate_paths.end(), is_abfs);
+	ONELAKE_LOG_DEBUG(&context, "[delta] Candidate paths for '%s': %s", name.c_str(),
+	                  StringUtil::Join(candidate_paths, ", ").c_str());
 
 	vector<string> errors;
 	for (auto &candidate : candidate_paths) {
+		ONELAKE_LOG_DEBUG(&context, "[delta] Trying path %s", candidate.c_str());
 		try {
 			vector<LogicalType> return_types;
 			vector<string> return_names;
@@ -422,10 +430,12 @@ TableFunction OneLakeTableEntry::GetScanFunction(ClientContext &context, unique_
 		} catch (const Exception &ex) {
 			string path_info = GetAbfssPathDiagnostic(candidate);
 			errors.push_back(StringUtil::Format("%s (%s)", ex.what(), path_info));
+			ONELAKE_LOG_WARN(&context, "[delta] Path failed: %s (%s)", ex.what(), candidate.c_str());
 		}
 	}
 
 	string error_summary = errors.empty() ? "no candidate paths resolved" : StringUtil::Join(errors, "; ");
+	ONELAKE_LOG_ERROR(&context, "[delta] Failed to bind table '%s': %s", name.c_str(), error_summary.c_str());
 	throw IOException("Failed to bind Delta scan for OneLake table '%s'. Errors: %s", name, error_summary);
 }
 

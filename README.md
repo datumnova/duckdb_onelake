@@ -11,7 +11,7 @@ DISCLAIMER: Currently, this extension is in an experimental phase..
 ## Features
 - Authentication using:
     - Azure service principal credentials (or Fabric Workspace Managed Identity).
-    - Credentials from environment variables.
+    - Credentials from environment variables via a configurable credential chain (`CHAIN 'env'`).
     - Credentials picked up from the Azure CLI logged in user.
 - Connect to OneLake workspaces and lakehouses.
 - Attach multiple lakehouses from the same OneLake workspace.
@@ -97,23 +97,59 @@ Optionally, you can replace the secret creation and authentication steps by sett
 export ONELAKE_TENANT_ID='<your_tenant_id>'
 export ONELAKE_CLIENT_ID='<your_client_id>'
 export ONELAKE_CLIENT_SECRET='<your_client_secret>'
+export AZURE_STORAGE_TOKEN='<preissued_onelake_access_token>'
+export FABRIC_API_TOKEN='<preissued_fabric_api_token>'
 ```
 And then in the DuckDB shell, you can replace the `CREATE SECRET` statements with:
 ```sql
 CREATE SECRET onelake (
     TYPE ONELAKE,
-    TENANT_ID '${ONELAKE_TENANT_ID}',
-    CLIENT_ID '${ONELAKE_CLIENT_ID}',
-    CLIENT_SECRET '${ONELAKE_CLIENT_SECRET}'
+    TENANT_ID getenv('ONELAKE_TENANT_ID'),
+    CLIENT_ID getenv('ONELAKE_CLIENT_ID'),
+    CLIENT_SECRET getenv('ONELAKE_CLIENT_SECRET')
 );
 CREATE SECRET  (
     TYPE azure,
     PROVIDER service_principal,
-    TENANT_ID '${ONELAKE_TENANT_ID}',
-    CLIENT_ID '${ONELAKE_CLIENT_ID}',
-    CLIENT_SECRET '${ONELAKE_CLIENT_SECRET}'
+    TENANT_ID getenv('ONELAKE_TENANT_ID'),
+    CLIENT_ID getenv('ONELAKE_CLIENT_ID'),
+    CLIENT_SECRET getenv('ONELAKE_CLIENT_SECRET')
 );
+
+-- Optional: use preissued tokens stored in env variables (defaults shown)
+SET onelake_env_fabric_token_variable = 'FABRIC_API_TOKEN';
+SET onelake_env_storage_token_variable = 'AZURE_STORAGE_TOKEN';
+CREATE SECRET onelake_env (
+    TYPE ONELAKE,
+    PROVIDER credential_chain,
+    CHAIN 'env'
+);
+-- Combine chain steps if you want CLI fallback
+CREATE SECRET onelake_env_chain (
+    TYPE ONELAKE,
+    PROVIDER credential_chain,
+    CHAIN 'cli, env'
+);
+
+-- Optionally keep the token in-session instead of touching the shell
+SET VARIABLE AZURE_STORAGE_TOKEN = '<preissued_onelake_access_token>';
 ```
+
+Every `ATTACH ... (TYPE ONELAKE)` run now tries to auto-create the secrets it needs from those tokens:
+
+- a temporary OneLake secret named `__onelake_env_secret` whose credential chain is `env` for Fabric API calls, and
+- an Azure access-token secret named `env_secret` so `httpfs`/`delta` can authenticate against the DFS endpoint.
+
+Both secrets reuse the variable names captured when you issued `CREATE SECRET`, so you only need to provide
+`FABRIC_API_TOKEN`/`AZURE_STORAGE_TOKEN` (or their overrides) via environment variables or `SET VARIABLE`. If either
+token is missing, `ATTACH` raises an error that points to the exact variable to populate, which avoids ambiguous
+"no secret found" failures. Manual Azure secret creation is no longer required in the env-token flow. Token lookup
+prefers values from `SET VARIABLE <name>` before falling back to the surrounding environment, which keeps tokens
+scoped to the DuckDB session when desired.
+
+The `onelake_env_fabric_token_variable` and `onelake_env_storage_token_variable` options are scoped like any other
+DuckDB setting. Set them *before* `CREATE SECRET` when you want the extension to remember different variable names.
+When left untouched they continue to default to `FABRIC_API_TOKEN` and `AZURE_STORAGE_TOKEN` respectively.
 
 ## Building
 ### Managing dependencies

@@ -3,7 +3,9 @@
 #include "storage/onelake_catalog.hpp"
 #include "storage/onelake_schema_entry.hpp"
 #include "onelake_api.hpp"
+#include "onelake_logging.hpp"
 #include "duckdb/catalog/catalog_transaction.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/main/secret/secret.hpp"
@@ -44,30 +46,35 @@ void EnsureAzureClientCredentialEnv(const OneLakeCredentials &credentials) {
 void EnsureHttpBearerSecret(ClientContext &context, OneLakeCatalog &catalog, const OneLakeSchemaEntry *schema_entry) {
 	// Delta kernel defers to Azure default credentials; seed env vars so our service principal is used.
 	EnsureAzureClientCredentialEnv(catalog.GetCredentials());
+	ONELAKE_LOG_DEBUG(&context, "[delta] Ensuring HTTP bearer secret for workspace=%s",
+	                  catalog.GetWorkspaceId().c_str());
 
 	auto &secret_manager = SecretManager::Get(context);
 	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
 
 	auto &credentials = catalog.GetCredentials();
-	auto token = OneLakeAPI::GetAccessToken(credentials, OneLakeTokenAudience::OneLakeDfs);
 
 	string workspace_id = catalog.GetWorkspaceId();
-	duckdb::vector<string> scopes;
-	std::unordered_set<string> seen;
-	auto add_scope = [&](const string &scope) {
+	duckdb::vector<string> dfs_scopes;
+	std::unordered_set<string> dfs_seen;
+	auto push_scope = [&](duckdb::vector<string> &target, std::unordered_set<string> &target_seen,
+	                      const string &scope) {
 		if (scope.empty()) {
 			return;
 		}
-		if (!seen.insert(scope).second) {
+		if (!target_seen.insert(scope).second) {
 			return;
 		}
-		scopes.push_back(scope);
+		target.push_back(scope);
+	};
+	auto add_scope = [&](const string &scope) {
+		push_scope(dfs_scopes, dfs_seen, scope);
 	};
 
-	string base_https = "https://onelake.dfs.fabric.microsoft.com/" + workspace_id;
+	string base_https_dfs = "https://onelake.dfs.fabric.microsoft.com/" + workspace_id;
 	string base_abfss = "abfss://" + workspace_id + "@onelake.dfs.fabric.microsoft.com";
-	add_scope(base_https);
-	add_scope(base_https + "/");
+	add_scope(base_https_dfs);
+	add_scope(base_https_dfs + "/");
 	add_scope(base_abfss);
 	add_scope(base_abfss + "/");
 
@@ -75,15 +82,15 @@ void EnsureHttpBearerSecret(ClientContext &context, OneLakeCatalog &catalog, con
 		if (identifier.empty()) {
 			return;
 		}
-		add_scope(base_https + "/" + identifier);
-		add_scope(base_https + "/" + identifier + "/");
-		add_scope(base_https + "/" + identifier + ".Lakehouse");
-		add_scope(base_https + "/" + identifier + ".Lakehouse/");
+		add_scope(base_https_dfs + "/" + identifier);
+		add_scope(base_https_dfs + "/" + identifier + "/");
+		add_scope(base_https_dfs + "/" + identifier + ".Lakehouse");
+		add_scope(base_https_dfs + "/" + identifier + ".Lakehouse/");
 		add_scope(base_abfss + "/" + identifier);
 		add_scope(base_abfss + "/" + identifier + "/");
 		add_scope(base_abfss + "/" + identifier + ".Lakehouse");
 		add_scope(base_abfss + "/" + identifier + ".Lakehouse/");
-		add_scope(base_https + "/" + identifier + "/Tables");
+		add_scope(base_https_dfs + "/" + identifier + "/Tables");
 		add_scope(base_abfss + "/" + identifier + "/Tables");
 	};
 
@@ -95,17 +102,28 @@ void EnsureHttpBearerSecret(ClientContext &context, OneLakeCatalog &catalog, con
 		add_lakehouse_scopes(lakehouse_name);
 	}
 
-	add_scope(base_https + "/Tables");
+	add_scope(base_https_dfs + "/Tables");
 	add_scope(base_abfss + "/Tables");
 
-	auto secret = make_uniq<KeyValueSecret>(scopes, "http", "config", workspace_id);
-	secret->secret_map["bearer_token"] = Value(token);
-	secret->redact_keys = {"bearer_token"};
+	auto register_secret = [&](const duckdb::vector<string> &scope_list) {
+		if (scope_list.empty()) {
+			return;
+		}
+		auto token_value = OneLakeAPI::GetAccessToken(&context, credentials, OneLakeTokenAudience::OneLakeDfs);
+		ONELAKE_LOG_DEBUG(&context, "[delta] Registering dfs HTTP bearer secret with %llu scope entries",
+		                  static_cast<long long>(scope_list.size()));
+		auto secret = make_uniq<KeyValueSecret>(scope_list, "http", "config", workspace_id);
+		secret->secret_map["bearer_token"] = Value(token_value);
+		secret->redact_keys = {"bearer_token"};
 
-	const BaseSecret *base_ptr = secret.release();
-	unique_ptr<const BaseSecret> entry(base_ptr);
-	secret_manager.RegisterSecret(transaction, std::move(entry), OnCreateConflict::REPLACE_ON_CONFLICT,
-	                              SecretPersistType::TEMPORARY, SecretManager::TEMPORARY_STORAGE_NAME);
+		const BaseSecret *base_ptr = secret.release();
+		unique_ptr<const BaseSecret> entry(base_ptr);
+		secret_manager.RegisterSecret(transaction, std::move(entry), OnCreateConflict::REPLACE_ON_CONFLICT,
+		                              SecretPersistType::TEMPORARY, SecretManager::TEMPORARY_STORAGE_NAME);
+	};
+
+	register_secret(dfs_scopes);
+	ONELAKE_LOG_INFO(&context, "[delta] HTTP bearer secrets prepared for workspace=%s", workspace_id.c_str());
 }
 
 } // namespace duckdb
