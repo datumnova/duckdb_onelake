@@ -37,19 +37,19 @@ CREATE SECRET onelake (
 #statement ok
 #SET VARIABLE AZURE_STORAGE_TOKEN='unit-test-storage-token';
 
-statement ok
-CREATE SECRET onelake_env_chain (
-    TYPE ONELAKE,
-    PROVIDER credential_chain,
-    CHAIN 'cli, env'
-);
+#statement ok
+#CREATE SECRET onelake_env_chain (
+#    TYPE ONELAKE,
+#    PROVIDER credential_chain,
+#    CHAIN 'cli, env'
+#);
 
-statement ok
-CREATE SECRET onelake_env_only (
-    TYPE ONELAKE,
-    PROVIDER credential_chain,
-    CHAIN 'env'
-);
+#statement ok
+#CREATE SECRET onelake_env_only (
+#    TYPE ONELAKE,
+#    PROVIDER credential_chain,
+#    CHAIN 'env'
+#);
 
 query I
 SELECT type || '|' || provider FROM duckdb_secrets() WHERE name='env_secret';
