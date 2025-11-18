@@ -51,10 +51,6 @@ CREATE SECRET onelake (
 #    CHAIN 'env'
 #);
 
-query I
-SELECT type || '|' || provider FROM duckdb_secrets() WHERE name='env_secret';
-----
-azure|access_token
 
 statement ok
 ATTACH 'your_workspace_name/your_lakehouse_name.Lakehouse'
