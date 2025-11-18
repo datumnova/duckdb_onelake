@@ -176,6 +176,43 @@ CREATE SECRET onelake (
 );
 ```
 
+#### 4. Environment Token Authentication
+
+If you already have OneLake/Fabric access tokens (for Fabric APIs, DFS endpoints, or the blob endpoint), store them in
+environment variables and tell DuckDB to read from them via the credential chain. The variable names are configurable
+through the extension options `onelake_env_fabric_token_variable`, `onelake_env_storage_token_variable`, and
+`onelake_env_blob_token_variable` (defaults: `FABRIC_API_TOKEN`, `AZURE_STORAGE_TOKEN`, `ONELAKE_BLOB_TOKEN`):
+
+```sql
+SET onelake_env_storage_token_variable = 'AZURE_STORAGE_TOKEN';
+SET onelake_env_blob_token_variable = 'ONELAKE_BLOB_TOKEN';
+CREATE SECRET onelake_env (
+    TYPE ONELAKE,
+    PROVIDER credential_chain,
+    CHAIN 'env'
+);
+
+-- Combine steps for resilience (CLI first, env fallback)
+CREATE SECRET onelake_env_chain (
+    TYPE ONELAKE,
+    PROVIDER credential_chain,
+    CHAIN 'cli, env'
+);
+
+-- Optional helper if you prefer not to export tokens at the shell level
+SET VARIABLE AZURE_STORAGE_TOKEN = '<preissued_onelake_access_token>';
+```
+
+During secret creation the extension records the chosen variable names so that token resolution uses the right sources
+even if the session settings change later. When Delta scans contact both the DFS (`https://onelake.dfs...`) and blob
+(`https://onelake.blob...`) hosts, the extension now registers separate HTTP bearer secrets so each host receives the
+token minted for its specific audience.
+
+Creating an `ONELAKE` secret whose credential chain is exactly `env` automatically provisions an Azure `env_secret`
+(`TYPE azure`, `PROVIDER access_token`) that reads the configured storage token variable (`AZURE_STORAGE_TOKEN` by
+default). The token can originate from the surrounding environment or from `SET VARIABLE AZURE_STORAGE_TOKEN = '...'`
+inside the session, whichever is populated first.
+
 ### Secret Management Implementation
 
 ```mermaid
@@ -970,7 +1007,7 @@ static string MakeAPIRequest(ClientContext &context, const string &url,
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     
     // Get access token and set authorization header
-    string token = GetAccessToken(credentials, OneLakeTokenAudience::Fabric);
+    string token = GetAccessToken(&context, credentials, OneLakeTokenAudience::Fabric);
     string auth_header = "Authorization: Bearer " + token;
     
     struct curl_slist *headers = nullptr;

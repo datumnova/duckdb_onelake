@@ -25,6 +25,12 @@ find_package(CURL REQUIRED)
 find_package(jsoncpp REQUIRED)
 find_package(azure-identity-cpp CONFIG)
 
+if(NOT ${azure-identity-cpp_FOUND}
+   OR NOT ${azure-storage-blobs-cpp_FOUND}
+   OR NOT ${azure-storage-files-datalake-cpp_FOUND})
+  message(FATAL_ERROR "Azure SDK not found, did you set up vcpkg correctly?")
+endif()
+
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
@@ -45,6 +51,8 @@ set(EXTENSION_SOURCES
     src/storage/onelake_transaction_manager.cpp
     src/storage/onelake_transaction.cpp
 )
+add_library(${EXTENSION_NAME} STATIC ${EXTENSION_SOURCES})
+set(PARAMETERS "-warnings")
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
@@ -54,7 +62,7 @@ set_property(TARGET ${EXTENSION_NAME} PROPERTY CXX_STANDARD_REQUIRED ON)
 set_property(TARGET ${LOADABLE_EXTENSION_NAME} PROPERTY CXX_STANDARD 17)
 set_property(TARGET ${LOADABLE_EXTENSION_NAME} PROPERTY CXX_STANDARD_REQUIRED ON)
 
-# Link OpenSSL, CURL and JsonCpp in both the static library as the loadable extension
+# Static Lib
 target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto CURL::libcurl JsonCpp::JsonCpp Azure::azure-identity)
 target_include_directories(
   ${EXTENSION_NAME}

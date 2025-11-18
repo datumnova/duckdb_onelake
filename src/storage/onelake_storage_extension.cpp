@@ -4,12 +4,12 @@
 #include "onelake_credentials.hpp"
 #include "onelake_api.hpp"
 #include "onelake_secret.hpp"
+#include "onelake_logging.hpp"
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/value.hpp"
-#include <iostream>
 #include <vector>
 
 namespace duckdb {
@@ -137,8 +137,52 @@ static OneLakeCredentials ExtractCredentialsFromSecret(const BaseSecret &secret)
 			throw InvalidInputException("OneLake credential_chain secret must contain chain");
 		}
 		string chain_str = chain_value.ToString();
-		StringUtil::Trim(chain_str);
-		credentials.credential_chain = StringUtil::Lower(chain_str);
+		credentials.credential_chain = NormalizeOneLakeCredentialChain(chain_str);
+		if (credentials.credential_chain.empty()) {
+			throw InvalidInputException("OneLake credential_chain secret must contain chain");
+		}
+		Value env_var_value;
+		if (kv_secret->TryGetValue("env_token_variable", env_var_value) && !env_var_value.IsNull()) {
+			auto env_var = env_var_value.ToString();
+			StringUtil::Trim(env_var);
+			if (!env_var.empty()) {
+				credentials.env_storage_variable = env_var;
+				credentials.env_fabric_variable = env_var;
+			}
+		}
+		Value env_fabric_value;
+		if (kv_secret->TryGetValue("env_fabric_token_variable", env_fabric_value) && !env_fabric_value.IsNull()) {
+			auto env_var = env_fabric_value.ToString();
+			StringUtil::Trim(env_var);
+			if (!env_var.empty()) {
+				credentials.env_fabric_variable = env_var;
+			}
+		}
+		Value env_storage_value;
+		if (kv_secret->TryGetValue("env_storage_token_variable", env_storage_value) && !env_storage_value.IsNull()) {
+			auto env_var = env_storage_value.ToString();
+			StringUtil::Trim(env_var);
+			if (!env_var.empty()) {
+				credentials.env_storage_variable = env_var;
+			}
+		}
+		Value env_blob_value;
+		if (kv_secret->TryGetValue("env_blob_token_variable", env_blob_value) && !env_blob_value.IsNull()) {
+			auto env_var = env_blob_value.ToString();
+			StringUtil::Trim(env_var);
+			if (!env_var.empty()) {
+				credentials.env_blob_variable = env_var;
+			}
+		}
+		if (credentials.env_fabric_variable.empty()) {
+			credentials.env_fabric_variable = ONELAKE_DEFAULT_ENV_FABRIC_TOKEN_VARIABLE;
+		}
+		if (credentials.env_storage_variable.empty()) {
+			credentials.env_storage_variable = ONELAKE_DEFAULT_ENV_STORAGE_TOKEN_VARIABLE;
+		}
+		if (credentials.env_blob_variable.empty()) {
+			credentials.env_blob_variable = ONELAKE_DEFAULT_ENV_BLOB_TOKEN_VARIABLE;
+		}
 	} else if (provider == "service_principal") {
 		credentials.provider = OneLakeCredentialProvider::ServicePrincipal;
 		Value tenant_id, client_id, client_secret;
@@ -228,6 +272,8 @@ unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(optional_ptr<Storage
 	auto parsed_target = ParseAttachTarget(attach_target);
 	string workspace_token = parsed_target.workspace_token;
 	string default_lakehouse = parsed_target.lakehouse_token;
+	ONELAKE_LOG_INFO(&context, "[attach] Resolving workspace='%s' lakehouse='%s'", workspace_token.c_str(),
+	                 default_lakehouse.c_str());
 
 	// Check for unsupported options
 	for (auto &option : info.options) {
@@ -247,10 +293,12 @@ unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(optional_ptr<Storage
 	if (!secret_match.HasMatch()) {
 		throw InvalidInputException("No OneLake secret found. Create a secret with: CREATE SECRET (TYPE ONELAKE, ...)");
 	}
+	ONELAKE_LOG_DEBUG(&context, "[attach] Using secret '%s'", secret_match.GetSecret().GetName().c_str());
 
 	OneLakeCredentials credentials = ExtractCredentialsFromSecret(secret_match.GetSecret());
 	OneLakeWorkspace resolved_workspace = ResolveWorkspace(context, credentials, workspace_token);
 	string workspace_id = resolved_workspace.id;
+	ONELAKE_LOG_INFO(&context, "[attach] Workspace resolved to id=%s", workspace_id.c_str());
 
 	if (!StringUtil::CIEquals(workspace_id, workspace_token)) {
 		const auto refined_secret_path = "onelake://" + workspace_id;

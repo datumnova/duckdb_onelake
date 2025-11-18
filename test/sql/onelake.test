@@ -32,6 +32,31 @@ CREATE SECRET onelake (
 );
 
 statement ok
+SET onelake_env_token_variable='CUSTOM_STORAGE_TOKEN';
+
+statement ok
+SET VARIABLE AZURE_STORAGE_TOKEN='unit-test-storage-token';
+
+statement ok
+CREATE SECRET onelake_env_chain (
+    TYPE ONELAKE,
+    PROVIDER credential_chain,
+    CHAIN 'cli, env'
+);
+
+statement ok
+CREATE SECRET onelake_env_only (
+    TYPE ONELAKE,
+    PROVIDER credential_chain,
+    CHAIN 'env'
+);
+
+query I
+SELECT type || '|' || provider FROM duckdb_secrets() WHERE name='env_secret';
+----
+azure|access_token
+
+statement ok
 ATTACH 'your_workspace_name/your_lakehouse_name.Lakehouse'
       AS your_connection_name
       (TYPE ONELAKE);

@@ -15,6 +15,21 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register storage extension for catalog functionality
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
+	if (config.extension_parameters.find(ONELAKE_ENV_FABRIC_TOKEN_OPTION) == config.extension_parameters.end()) {
+		config.AddExtensionOption(ONELAKE_ENV_FABRIC_TOKEN_OPTION,
+		                          "Environment variable name that stores the Fabric API access token",
+		                          LogicalType::VARCHAR, Value(ONELAKE_DEFAULT_ENV_FABRIC_TOKEN_VARIABLE));
+	}
+	if (config.extension_parameters.find(ONELAKE_ENV_STORAGE_TOKEN_OPTION) == config.extension_parameters.end()) {
+		config.AddExtensionOption(ONELAKE_ENV_STORAGE_TOKEN_OPTION,
+		                          "Environment variable name that stores the OneLake storage access token",
+		                          LogicalType::VARCHAR, Value(ONELAKE_DEFAULT_ENV_STORAGE_TOKEN_VARIABLE));
+	}
+	if (config.extension_parameters.find(ONELAKE_ENV_BLOB_TOKEN_OPTION) == config.extension_parameters.end()) {
+		config.AddExtensionOption(ONELAKE_ENV_BLOB_TOKEN_OPTION,
+		                          "Environment variable name that stores the OneLake blob endpoint access token",
+		                          LogicalType::VARCHAR, Value(ONELAKE_DEFAULT_ENV_BLOB_TOKEN_VARIABLE));
+	}
 	config.storage_extensions["onelake"] = make_uniq<OneLakeStorageExtension>();
 	config.parser_extensions.push_back(CreateOneLakeParserExtension());
 

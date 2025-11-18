@@ -5,7 +5,7 @@
 
 namespace duckdb {
 
-enum class OneLakeTokenAudience { Fabric, OneLakeDfs };
+enum class OneLakeTokenAudience { Fabric, OneLakeDfs, OneLakeBlob };
 
 class OneLakeAPI {
 public:
@@ -33,7 +33,7 @@ public:
 	static vector<string> ListDirectory(ClientContext &context, const string &abfss_path,
 	                                    OneLakeCredentials &credentials);
 
-	static string GetAccessToken(OneLakeCredentials &credentials,
+	static string GetAccessToken(ClientContext *context, OneLakeCredentials &credentials,
 	                             OneLakeTokenAudience audience = OneLakeTokenAudience::Fabric);
 
 private:
