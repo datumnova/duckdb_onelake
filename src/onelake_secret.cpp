@@ -61,7 +61,7 @@ struct AzureSecretCreationOutcome {
 };
 
 AzureSecretCreationOutcome TryAutoCreateAzureEnvSecret(ClientContext &context, const string &variable_name,
-	                                                  SecretPersistType persist_type, const string &storage_type) {
+                                                       SecretPersistType persist_type, const string &storage_type) {
 	AzureSecretCreationOutcome outcome;
 	string token_value = ResolveTokenFromContextOrEnv(&context, variable_name);
 	if (token_value.empty()) {
@@ -247,8 +247,7 @@ EnvSecretAttemptResult TryAutoCreateSecretsFromEnv(ClientContext &context) {
 	string fabric_token = ResolveTokenFromContextOrEnv(&context, fabric_variable);
 	if (fabric_token.empty()) {
 		result.onelake_missing_token = true;
-		ONELAKE_LOG_INFO(&context,
-		                 "[secrets] Skipping OneLake env secret auto-creation because '%s' is unset or empty",
+		ONELAKE_LOG_INFO(&context, "[secrets] Skipping OneLake env secret auto-creation because '%s' is unset or empty",
 		                 fabric_variable.c_str());
 	} else {
 		try {
@@ -264,8 +263,7 @@ EnvSecretAttemptResult TryAutoCreateSecretsFromEnv(ClientContext &context) {
 		}
 	}
 
-	auto azure_outcome =
-	    TryAutoCreateAzureEnvSecret(context, storage_variable, SecretPersistType::TEMPORARY, string());
+	auto azure_outcome = TryAutoCreateAzureEnvSecret(context, storage_variable, SecretPersistType::TEMPORARY, string());
 	result.azure_created = azure_outcome.created;
 	result.azure_missing_token = azure_outcome.missing_token;
 

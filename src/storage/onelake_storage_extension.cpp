@@ -285,8 +285,8 @@ unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(optional_ptr<Storage
 	if (!secret_match.HasMatch()) {
 		if (env_secret_status.onelake_missing_token) {
 			const string variable_name = env_secret_status.onelake_variable.empty()
-			                               ? string(ONELAKE_DEFAULT_ENV_FABRIC_TOKEN_VARIABLE)
-			                               : env_secret_status.onelake_variable;
+			                                 ? string(ONELAKE_DEFAULT_ENV_FABRIC_TOKEN_VARIABLE)
+			                                 : env_secret_status.onelake_variable;
 			throw InvalidInputException(
 			    "No OneLake secret found because environment variable '%s' is unset or empty. "
 			    "Export a Fabric token via 'export %s=...' (or SET VARIABLE) or create a secret manually with: "

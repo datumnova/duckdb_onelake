@@ -152,11 +152,11 @@ ParserExtensionPlanResult OneLakeUsingIcebergPlan(ParserExtensionInfo *, ClientC
 		throw InvalidInputException("Unable to resolve OneLake workspace identifier for Iceberg scan");
 	}
 
-	string lakehouse_id = schema_entry.schema_data && !schema_entry.schema_data->id.empty()
-	                          ? schema_entry.schema_data->id
-	                          : (schema_entry.schema_data && !schema_entry.schema_data->name.empty()
-	                                 ? schema_entry.schema_data->name
-	                                 : schema_entry.name);
+	string lakehouse_id =
+	    schema_entry.schema_data && !schema_entry.schema_data->id.empty()
+	        ? schema_entry.schema_data->id
+	        : (schema_entry.schema_data && !schema_entry.schema_data->name.empty() ? schema_entry.schema_data->name
+	                                                                               : schema_entry.name);
 	if (lakehouse_id.empty()) {
 		throw InvalidInputException("Unable to resolve OneLake lakehouse identifier for Iceberg scan");
 	}

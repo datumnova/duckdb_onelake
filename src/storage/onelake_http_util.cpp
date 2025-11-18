@@ -67,7 +67,9 @@ void EnsureHttpBearerSecret(ClientContext &context, OneLakeCatalog &catalog, con
 		}
 		target.push_back(scope);
 	};
-	auto add_scope = [&](const string &scope) { push_scope(dfs_scopes, dfs_seen, scope); };
+	auto add_scope = [&](const string &scope) {
+		push_scope(dfs_scopes, dfs_seen, scope);
+	};
 
 	string base_https_dfs = "https://onelake.dfs.fabric.microsoft.com/" + workspace_id;
 	string base_abfss = "abfss://" + workspace_id + "@onelake.dfs.fabric.microsoft.com";

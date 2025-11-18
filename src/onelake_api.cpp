@@ -319,9 +319,8 @@ string OneLakeAPI::GetAccessToken(ClientContext *context, OneLakeCredentials &cr
 	curl_easy_cleanup(curl);
 	if (res != CURLE_OK || response_code != 200) {
 		auto body = response_string.empty() ? string("<empty>") : response_string;
-		ONELAKE_LOG_ERROR(context,
-		                 "[credentials] Service principal token request failed (HTTP %ld) body=%s",
-		                 response_code, body.c_str());
+		ONELAKE_LOG_ERROR(context, "[credentials] Service principal token request failed (HTTP %ld) body=%s",
+		                  response_code, body.c_str());
 		throw IOException("Failed to obtain OneLake access token: HTTP %ld - %s", response_code, body.c_str());
 	}
 
@@ -644,8 +643,8 @@ vector<OneLakeTable> OneLakeAPI::GetTables(ClientContext &context, const string 
 			if (root.isMember("continuationToken") && root["continuationToken"].isString()) {
 				auto token = root["continuationToken"].asString();
 				if (!token.empty()) {
-					next_url = BuildAPIUrl(workspace_id,
-					                       "lakehouses/" + lakehouse_id + "/tables?continuationToken=" + UrlEncode(token));
+					next_url = BuildAPIUrl(workspace_id, "lakehouses/" + lakehouse_id +
+					                                         "/tables?continuationToken=" + UrlEncode(token));
 					continue;
 				}
 			}
