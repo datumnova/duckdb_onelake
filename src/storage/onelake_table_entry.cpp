@@ -29,8 +29,8 @@ namespace duckdb {
 
 namespace {
 
-constexpr const char *DELTA_FUNCTION_NAME = "delta_scan";
-constexpr const char *ICEBERG_FUNCTION_NAME = "iceberg_scan";
+constexpr char DELTA_FUNCTION_NAME[] = "delta_scan";
+constexpr char ICEBERG_FUNCTION_NAME[] = "iceberg_scan";
 
 bool HasScheme(const string &path) {
 	return path.find("://") != string::npos;
@@ -341,9 +341,8 @@ void OneLakeTableEntry::SetPartitionColumns(vector<string> columns) {
 
 void OneLakeTableEntry::UpdateColumnDefinitions(const vector<string> &names, const vector<LogicalType> &types) {
 	ColumnList new_columns;
-	for (idx_t i = 0; i < types.size(); i++) {
-		ColumnDefinition column(names[i], types[i]);
-		new_columns.AddColumn(std::move(column));
+	for (idx_t i = 0; i < names.size(); i++) {
+		new_columns.AddColumn(ColumnDefinition(names[i], types[i]));
 	}
 	new_columns.Finalize();
 	columns = std::move(new_columns);
@@ -408,10 +407,8 @@ TableFunction OneLakeTableEntry::GetScanFunction(ClientContext &context, unique_
 		throw IOException("Failed to bind Iceberg scan for OneLake table '%s'. Errors: %s", name, error_summary);
 	}
 
-	// Only Delta format remains
 	auto delta_function = ResolveDeltaFunction(context);
 
-	// Prioritize abfss paths for better performance with OneLake
 	auto is_abfs = [](const string &candidate) {
 		return StringUtil::StartsWith(candidate, "abfs://") || StringUtil::StartsWith(candidate, "abfss://");
 	};

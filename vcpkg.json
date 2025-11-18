@@ -1,10 +1,14 @@
 {
   "dependencies": [
-        "vcpkg-cmake",
+    "vcpkg-cmake",
     "openssl",
     "curl",
     "jsoncpp",
-    "azure-identity-cpp"
+    "azure-identity-cpp",
+    {
+      "name": "azure-core-cpp",
+      "features": ["curl"]
+    }
   ],
   "vcpkg-configuration": {
     "overlay-ports": [

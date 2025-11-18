@@ -115,10 +115,7 @@ void OneLakeCatalog::SetDefaultSchema(const string &schema_name) {
 }
 
 string OneLakeCatalog::GetDefaultSchema() const {
-	if (default_schema.empty()) {
-		return Catalog::GetDefaultSchema();
-	}
-	return default_schema;
+	return default_schema.empty() ? Catalog::GetDefaultSchema() : default_schema;
 }
 
 } // namespace duckdb

@@ -115,10 +115,7 @@ idx_t DiscoverTablesFromStorage(ClientContext &context, OneLakeCatalog &catalog,
 		vector<string> entries;
 		try {
 			entries = OneLakeAPI::ListDirectory(context, root, catalog.GetCredentials());
-			// Printer::Print(StringUtil::Format("[onelake] scanned directory '%s' via DFS API (entries=%llu)", root,
-			//                                   static_cast<uint64_t>(entries.size())));
 		} catch (const Exception &ex) {
-			// Printer::Print(StringUtil::Format("[onelake] failed to list '%s': %s", root, ex.what()));
 			continue;
 		}
 		for (auto &leaf : entries) {
@@ -141,7 +138,6 @@ idx_t DiscoverTablesFromStorage(ClientContext &context, OneLakeCatalog &catalog,
 				auto delta_entries = OneLakeAPI::ListDirectory(context, delta_dir, catalog.GetCredentials());
 				has_delta_log = !delta_entries.empty();
 			} catch (const Exception &) {
-				// Printer::Print(StringUtil::Format("[onelake] failed to inspect '%s/%s'", root, leaf));
 				has_delta_log = false;
 			}
 			bool has_iceberg_metadata = false;
@@ -179,8 +175,6 @@ idx_t DiscoverTablesFromStorage(ClientContext &context, OneLakeCatalog &catalog,
 			}
 			AddDiscoveredTable(catalog, schema, table_set, leaf, detected_format, relative_location);
 			discovered++;
-			// Printer::Print(
-			//     StringUtil::Format("[onelake] registered storage table '%s' from '%s/%s'", leaf, root, leaf));
 		}
 	}
 
@@ -205,10 +199,6 @@ void OneLakeTableSet::LoadEntries(ClientContext &context) {
 	auto lakehouse_id = schema.schema_data->id;
 	auto lakehouse_name = schema.schema_data->name;
 
-	// Printer::Print(StringUtil::Format("[onelake] loading tables for lakehouse '%s' (id=%s)", lakehouse_name,
-	//                                   lakehouse_id.empty() ? "<unknown>" : lakehouse_id));
-
-	// Get tables from the OneLake API
 	auto &credentials = onelake_catalog.GetCredentials();
 	auto tables = OneLakeAPI::GetTables(context, onelake_catalog.GetWorkspaceId(), *schema.schema_data, credentials);
 	std::unordered_set<string> seen_names;
@@ -236,17 +226,12 @@ void OneLakeTableSet::LoadEntries(ClientContext &context) {
 				if (!table_info.has_metadata) {
 					detail_endpoint_supported = false;
 					if (!detail_endpoint_reported) {
-						// Printer::Print("[onelake] table detail endpoint returned no metadata; continuing without
-						// it");
 						detail_endpoint_reported = true;
 					}
 				}
 			} catch (const Exception &ex) {
 				detail_endpoint_supported = false;
 				if (!detail_endpoint_reported) {
-					// Printer::Print(StringUtil::Format(
-					//     "[onelake] table detail lookup failed for '%s': %s. Skipping further detail requests.",
-					//     table.name, ex.what()));
 					detail_endpoint_reported = true;
 				}
 			}
@@ -269,30 +254,12 @@ void OneLakeTableSet::LoadEntries(ClientContext &context) {
 			}
 		}
 
-		const auto resolved_location = table_entry->table_data->location;
-		const auto resolved_format =
-		    table_entry->table_data->format.empty() ? "<unknown>" : table_entry->table_data->format;
-
 		CreateEntry(std::move(table_entry));
 		seen_names.insert(StringUtil::Lower(table.name));
 		api_count++;
-		// Printer::Print(StringUtil::Format("[onelake] API table '%s' (format=%s, location=%s)", table.name,
-		//                                   resolved_format, resolved_location));
 	}
 
 	auto storage_count = DiscoverTablesFromStorage(context, onelake_catalog, schema, *this, seen_names);
-
-	// if (api_count == 0 && storage_count == 0) {
-	// 	Printer::Print(StringUtil::Format(
-	// 	    "[onelake] no tables discovered for lakehouse '%s'. Verify the Fabric API permissions and that tables "
-	// 	    "exist under the 'Tables/' directory.",
-	// 	    lakehouse_name));
-	// } else {
-	// 	// Printer::Print(
-	// 	//     StringUtil::Format("[onelake] registered %llu tables for lakehouse '%s' (api=%llu, storage=%llu)",
-	// 	//                        static_cast<uint64_t>(api_count + storage_count), lakehouse_name,
-	// 	//                        static_cast<uint64_t>(api_count), static_cast<uint64_t>(storage_count)));
-	// }
 }
 
 optional_ptr<CatalogEntry> OneLakeTableSet::RefreshTable(ClientContext &context, const string &table_name) {
@@ -368,16 +335,12 @@ unique_ptr<OneLakeTableInfo> OneLakeTableSet::GetTableInfo(ClientContext &contex
 			if (!table_info_api.has_metadata) {
 				detail_endpoint_supported = false;
 				if (!detail_endpoint_reported) {
-					// Printer::Print("[onelake] table detail endpoint returned no metadata; continuing without it");
 					detail_endpoint_reported = true;
 				}
 			}
 		} catch (const Exception &ex) {
 			detail_endpoint_supported = false;
 			if (!detail_endpoint_reported) {
-				// Printer::Print(StringUtil::Format(
-				//     "[onelake] table detail lookup failed for '%s': %s. Skipping further detail requests.",
-				//     table_name, ex.what()));
 				detail_endpoint_reported = true;
 			}
 		}

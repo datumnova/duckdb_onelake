@@ -5,7 +5,7 @@
 
 namespace duckdb {
 
-enum class OneLakeTokenAudience { Fabric, OneLakeDfs, OneLakeBlob };
+enum class OneLakeTokenAudience { Fabric, OneLakeDfs };
 
 class OneLakeAPI {
 public:

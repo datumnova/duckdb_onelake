@@ -166,22 +166,11 @@ static OneLakeCredentials ExtractCredentialsFromSecret(const BaseSecret &secret)
 				credentials.env_storage_variable = env_var;
 			}
 		}
-		Value env_blob_value;
-		if (kv_secret->TryGetValue("env_blob_token_variable", env_blob_value) && !env_blob_value.IsNull()) {
-			auto env_var = env_blob_value.ToString();
-			StringUtil::Trim(env_var);
-			if (!env_var.empty()) {
-				credentials.env_blob_variable = env_var;
-			}
-		}
 		if (credentials.env_fabric_variable.empty()) {
 			credentials.env_fabric_variable = ONELAKE_DEFAULT_ENV_FABRIC_TOKEN_VARIABLE;
 		}
 		if (credentials.env_storage_variable.empty()) {
 			credentials.env_storage_variable = ONELAKE_DEFAULT_ENV_STORAGE_TOKEN_VARIABLE;
-		}
-		if (credentials.env_blob_variable.empty()) {
-			credentials.env_blob_variable = ONELAKE_DEFAULT_ENV_BLOB_TOKEN_VARIABLE;
 		}
 	} else if (provider == "service_principal") {
 		credentials.provider = OneLakeCredentialProvider::ServicePrincipal;
@@ -283,6 +272,9 @@ unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(optional_ptr<Storage
 		}
 	}
 
+	// Try to auto-create secrets from environment variables on every attach
+	auto env_secret_status = TryAutoCreateSecretsFromEnv(context);
+
 	// Resolve credentials using the most specific secret available
 	auto catalog_transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
 	const auto secret_candidate_path = "onelake://" + workspace_token;
@@ -291,9 +283,18 @@ unique_ptr<Catalog> OneLakeStorageExtension::AttachInternal(optional_ptr<Storage
 		secret_match = secret_manager.LookupSecret(catalog_transaction, "onelake://", "onelake");
 	}
 	if (!secret_match.HasMatch()) {
+		if (env_secret_status.onelake_missing_token) {
+			const string variable_name = env_secret_status.onelake_variable.empty()
+			                               ? string(ONELAKE_DEFAULT_ENV_FABRIC_TOKEN_VARIABLE)
+			                               : env_secret_status.onelake_variable;
+			throw InvalidInputException(
+			    "No OneLake secret found because environment variable '%s' is unset or empty. "
+			    "Export a Fabric token via 'export %s=...' (or SET VARIABLE) or create a secret manually with: "
+			    "CREATE SECRET (TYPE ONELAKE, ...)",
+			    variable_name.c_str(), variable_name.c_str());
+		}
 		throw InvalidInputException("No OneLake secret found. Create a secret with: CREATE SECRET (TYPE ONELAKE, ...)");
 	}
-	ONELAKE_LOG_DEBUG(&context, "[attach] Using secret '%s'", secret_match.GetSecret().GetName().c_str());
 
 	OneLakeCredentials credentials = ExtractCredentialsFromSecret(secret_match.GetSecret());
 	OneLakeWorkspace resolved_workspace = ResolveWorkspace(context, credentials, workspace_token);

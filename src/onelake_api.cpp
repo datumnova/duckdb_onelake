@@ -26,6 +26,20 @@ static size_t WriteCallback(void *contents, size_t size, size_t nmemb, string *u
 
 namespace {
 
+string UrlEncode(const string &value) {
+	CURL *curl = curl_easy_init();
+	string result = value;
+	if (curl) {
+		char *escaped = curl_easy_escape(curl, value.c_str(), static_cast<int>(value.size()));
+		if (escaped) {
+			result = string(escaped);
+			curl_free(escaped);
+		}
+		curl_easy_cleanup(curl);
+	}
+	return result;
+}
+
 struct AbfssPathComponents {
 	string container;
 	string host;
@@ -152,8 +166,6 @@ const char *AudienceLabel(OneLakeTokenAudience audience) {
 		return "fabric";
 	case OneLakeTokenAudience::OneLakeDfs:
 		return "dfs";
-	case OneLakeTokenAudience::OneLakeBlob:
-		return "blob";
 	default:
 		return "fabric";
 	}
@@ -186,16 +198,10 @@ string AcquireTokenViaCredentialChain(ClientContext *context, OneLakeTokenAudien
 			case OneLakeTokenAudience::Fabric:
 				add_candidate(credentials.env_fabric_variable, ONELAKE_DEFAULT_ENV_FABRIC_TOKEN_VARIABLE);
 				add_candidate(credentials.env_storage_variable, ONELAKE_DEFAULT_ENV_STORAGE_TOKEN_VARIABLE);
-				add_candidate(credentials.env_blob_variable, ONELAKE_DEFAULT_ENV_BLOB_TOKEN_VARIABLE);
 				break;
 			case OneLakeTokenAudience::OneLakeDfs:
 				add_candidate(credentials.env_storage_variable, ONELAKE_DEFAULT_ENV_STORAGE_TOKEN_VARIABLE);
-				add_candidate(credentials.env_blob_variable, ONELAKE_DEFAULT_ENV_BLOB_TOKEN_VARIABLE);
 				add_candidate(credentials.env_fabric_variable, ONELAKE_DEFAULT_ENV_FABRIC_TOKEN_VARIABLE);
-				break;
-			case OneLakeTokenAudience::OneLakeBlob:
-				add_candidate(credentials.env_blob_variable, ONELAKE_DEFAULT_ENV_BLOB_TOKEN_VARIABLE);
-				add_candidate(credentials.env_storage_variable, ONELAKE_DEFAULT_ENV_STORAGE_TOKEN_VARIABLE);
 				break;
 			default:
 				break;
@@ -235,25 +241,26 @@ string AcquireTokenViaCredentialChain(ClientContext *context, OneLakeTokenAudien
 
 } // namespace
 
-static const char *FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default";
-static const char *DFS_SCOPE = "https://storage.azure.com/.default";
-static const char *BLOB_SCOPE = "https://onelake.blob.fabric.microsoft.com/.default";
+namespace {
+const char *FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default";
+const char *DFS_SCOPE = "https://storage.azure.com/.default";
+const char *FABRIC_API_BASE = "https://api.fabric.microsoft.com/v1";
+const char *MICROSOFT_ENTRA_TOKEN_ENDPOINT = "https://login.microsoftonline.com";
 
-static const string &ScopeForAudience(OneLakeTokenAudience audience) {
+const string &ScopeForAudience(OneLakeTokenAudience audience) {
 	static const string fabric_scope = FABRIC_SCOPE;
 	static const string dfs_scope = DFS_SCOPE;
-	static const string blob_scope = BLOB_SCOPE;
 	switch (audience) {
 	case OneLakeTokenAudience::Fabric:
 		return fabric_scope;
 	case OneLakeTokenAudience::OneLakeDfs:
 		return dfs_scope;
-	case OneLakeTokenAudience::OneLakeBlob:
-		return blob_scope;
 	default:
 		return fabric_scope;
 	}
 }
+
+} // namespace
 
 string OneLakeAPI::GetAccessToken(ClientContext *context, OneLakeCredentials &credentials,
                                   OneLakeTokenAudience audience) {
@@ -278,24 +285,20 @@ string OneLakeAPI::GetAccessToken(ClientContext *context, OneLakeCredentials &cr
 	ONELAKE_LOG_INFO(context, "[credentials] Requesting service principal token for %s scope '%s'",
 	                 AudienceLabel(audience), scope.c_str());
 
-	CURL *curl;
-	CURLcode res;
-	string response_string;
-	string post_data;
-
-	curl = curl_easy_init();
+	CURL *curl = curl_easy_init();
 	if (!curl) {
 		throw InternalException("Failed to initialize CURL for OneLake API");
 	}
 
-	// Microsoft Entra ID token endpoint
-	string token_url = "https://login.microsoftonline.com/" + credentials.tenant_id + "/oauth2/v2.0/token";
+	string token_url = string(MICROSOFT_ENTRA_TOKEN_ENDPOINT) + "/" + credentials.tenant_id + "/oauth2/v2.0/token";
+	string response_string;
+	string post_data;
 
-	// Prepare POST data for client credentials flow
-	post_data = "grant_type=client_credentials";
-	post_data += "&client_id=" + credentials.client_id;
-	post_data += "&client_secret=" + credentials.client_secret;
-	post_data += "&scope=" + scope;
+	string encoded_client_id = UrlEncode(credentials.client_id);
+	string encoded_client_secret = UrlEncode(credentials.client_secret);
+	string encoded_scope = UrlEncode(scope);
+	post_data = "grant_type=client_credentials&client_id=" + encoded_client_id +
+	            "&client_secret=" + encoded_client_secret + "&scope=" + encoded_scope;
 
 	curl_easy_setopt(curl, CURLOPT_URL, token_url.c_str());
 	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_data.c_str());
@@ -307,7 +310,7 @@ string OneLakeAPI::GetAccessToken(ClientContext *context, OneLakeCredentials &cr
 	headers = curl_slist_append(headers, "Content-Type: application/x-www-form-urlencoded");
 	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
-	res = curl_easy_perform(curl);
+	CURLcode res = curl_easy_perform(curl);
 
 	long response_code;
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
@@ -315,8 +318,11 @@ string OneLakeAPI::GetAccessToken(ClientContext *context, OneLakeCredentials &cr
 	curl_slist_free_all(headers);
 	curl_easy_cleanup(curl);
 	if (res != CURLE_OK || response_code != 200) {
-		ONELAKE_LOG_ERROR(context, "[credentials] Service principal token request failed (HTTP %ld)", response_code);
-		throw IOException("Failed to obtain OneLake access token: HTTP %ld", response_code);
+		auto body = response_string.empty() ? string("<empty>") : response_string;
+		ONELAKE_LOG_ERROR(context,
+		                 "[credentials] Service principal token request failed (HTTP %ld) body=%s",
+		                 response_code, body.c_str());
+		throw IOException("Failed to obtain OneLake access token: HTTP %ld - %s", response_code, body.c_str());
 	}
 
 	// Parse JSON response to get access token
@@ -407,7 +413,7 @@ string OneLakeAPI::MakeAPIRequest(ClientContext &context, const string &url, One
 }
 
 string OneLakeAPI::BuildAPIUrl(const string &workspace_id, const string &endpoint) {
-	return "https://api.fabric.microsoft.com/v1/workspaces/" + workspace_id + "/" + endpoint;
+	return string(FABRIC_API_BASE) + "/workspaces/" + workspace_id + "/" + endpoint;
 }
 
 vector<OneLakeWorkspace> OneLakeAPI::GetWorkspaces(ClientContext &context, OneLakeCredentials &credentials) {
@@ -488,17 +494,7 @@ vector<OneLakeWorkspace> OneLakeAPI::GetWorkspaces(ClientContext &context, OneLa
 			if (root.isMember("continuationToken") && root["continuationToken"].isString()) {
 				auto token = root["continuationToken"].asString();
 				if (!token.empty()) {
-					CURL *curl = curl_easy_init();
-					string encoded_token = token;
-					if (curl) {
-						char *escaped = curl_easy_escape(curl, token.c_str(), static_cast<int>(token.size()));
-						if (escaped) {
-							encoded_token = string(escaped);
-							curl_free(escaped);
-						}
-						curl_easy_cleanup(curl);
-					}
-					next_url = "https://api.fabric.microsoft.com/v1/workspaces?continuationToken=" + encoded_token;
+					next_url = string(FABRIC_API_BASE) + "/workspaces?continuationToken=" + UrlEncode(token);
 					continue;
 				}
 			}
@@ -648,18 +644,8 @@ vector<OneLakeTable> OneLakeAPI::GetTables(ClientContext &context, const string 
 			if (root.isMember("continuationToken") && root["continuationToken"].isString()) {
 				auto token = root["continuationToken"].asString();
 				if (!token.empty()) {
-					CURL *curl = curl_easy_init();
-					string encoded_token = token;
-					if (curl) {
-						char *escaped = curl_easy_escape(curl, token.c_str(), static_cast<int>(token.size()));
-						if (escaped) {
-							encoded_token = string(escaped);
-							curl_free(escaped);
-						}
-						curl_easy_cleanup(curl);
-					}
 					next_url = BuildAPIUrl(workspace_id,
-					                       "lakehouses/" + lakehouse_id + "/tables?continuationToken=" + encoded_token);
+					                       "lakehouses/" + lakehouse_id + "/tables?continuationToken=" + UrlEncode(token));
 					continue;
 				}
 			}

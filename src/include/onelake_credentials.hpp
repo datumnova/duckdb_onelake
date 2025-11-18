@@ -14,7 +14,6 @@ struct OneLakeCredentials {
 	string credential_chain;
 	string env_fabric_variable;
 	string env_storage_variable;
-	string env_blob_variable;
 	OneLakeCredentialProvider provider = OneLakeCredentialProvider::ServicePrincipal;
 	struct TokenCacheEntry {
 		string token;

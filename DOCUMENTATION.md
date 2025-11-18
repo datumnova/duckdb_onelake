@@ -178,14 +178,13 @@ CREATE SECRET onelake (
 
 #### 4. Environment Token Authentication
 
-If you already have OneLake/Fabric access tokens (for Fabric APIs, DFS endpoints, or the blob endpoint), store them in
-environment variables and tell DuckDB to read from them via the credential chain. The variable names are configurable
-through the extension options `onelake_env_fabric_token_variable`, `onelake_env_storage_token_variable`, and
-`onelake_env_blob_token_variable` (defaults: `FABRIC_API_TOKEN`, `AZURE_STORAGE_TOKEN`, `ONELAKE_BLOB_TOKEN`):
+If you already have OneLake/Fabric access tokens (for Fabric APIs or the DFS endpoint), store them in environment
+variables and tell DuckDB to read from them via the credential chain. The variable names are configurable through the
+extension options `onelake_env_fabric_token_variable` and `onelake_env_storage_token_variable` (defaults:
+`FABRIC_API_TOKEN` and `AZURE_STORAGE_TOKEN`):
 
 ```sql
 SET onelake_env_storage_token_variable = 'AZURE_STORAGE_TOKEN';
-SET onelake_env_blob_token_variable = 'ONELAKE_BLOB_TOKEN';
 CREATE SECRET onelake_env (
     TYPE ONELAKE,
     PROVIDER credential_chain,
@@ -204,14 +203,20 @@ SET VARIABLE AZURE_STORAGE_TOKEN = '<preissued_onelake_access_token>';
 ```
 
 During secret creation the extension records the chosen variable names so that token resolution uses the right sources
-even if the session settings change later. When Delta scans contact both the DFS (`https://onelake.dfs...`) and blob
-(`https://onelake.blob...`) hosts, the extension now registers separate HTTP bearer secrets so each host receives the
-token minted for its specific audience.
+even if the session settings change later. When Delta scans contact the DFS (`https://onelake.dfs...`) host, the
+extension registers HTTP bearer secrets so each scope receives the token minted for the DFS audience.
 
-Creating an `ONELAKE` secret whose credential chain is exactly `env` automatically provisions an Azure `env_secret`
-(`TYPE azure`, `PROVIDER access_token`) that reads the configured storage token variable (`AZURE_STORAGE_TOKEN` by
-default). The token can originate from the surrounding environment or from `SET VARIABLE AZURE_STORAGE_TOKEN = '...'`
-inside the session, whichever is populated first.
+Each `ATTACH ... (TYPE ONELAKE)` run replays an env-aware bootstrap sequence:
+
+- It tries to build a temporary OneLake secret named `__onelake_env_secret` whose credential chain is `env` so Fabric
+    API calls can use the token pointed at by `onelake_env_fabric_token_variable` (default `FABRIC_API_TOKEN`).
+- It also creates or refreshes an Azure access-token secret named `env_secret` (type `azure`, provider
+    `access_token`) that reuses `onelake_env_storage_token_variable` (default `AZURE_STORAGE_TOKEN`) for DFS/ABFSS IO.
+
+Token lookup prefers values from `SET VARIABLE <name>` over process-level environment variables so you can keep
+credentials scoped to the current DuckDB session. Manual Azure secret creation is no longer required for the env-token
+flow; the extension handles the refresh automatically. If one of the required variables is empty, the attach attempt
+fails with a descriptive error that names the missing variable, eliminating ambiguous "no secret found" messages.
 
 ### Secret Management Implementation
 
@@ -298,6 +303,11 @@ sequenceDiagram
     Storage->>Catalog: new OneLakeCatalog(workspace_id, credentials)
     Catalog-->>Client: Attached Database
 ```
+
+Before the secret lookup happens the storage extension invokes `TryAutoCreateSecretsFromEnv()`. This helper inspects
+the configured Fabric and DFS token variable names, tries to mint `__onelake_env_secret` and `env_secret` if the
+tokens are present (from either `SET VARIABLE` or the process environment), and surfaces a tailored error when a
+variable is unset. This ensures `ATTACH` can succeed with only pre-issued tokens and no manual Azure secret setup.
 
 The attachment process begins in the `AttachInternal` method:
 

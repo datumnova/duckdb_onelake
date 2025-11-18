@@ -53,14 +53,10 @@ void EnsureHttpBearerSecret(ClientContext &context, OneLakeCatalog &catalog, con
 	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
 
 	auto &credentials = catalog.GetCredentials();
-	auto token = OneLakeAPI::GetAccessToken(&context, credentials, OneLakeTokenAudience::OneLakeDfs);
-	ONELAKE_LOG_DEBUG(&context, "[delta] Retrieved DFS token (length=%llu)", static_cast<long long>(token.size()));
 
 	string workspace_id = catalog.GetWorkspaceId();
 	duckdb::vector<string> dfs_scopes;
-	duckdb::vector<string> blob_scopes;
 	std::unordered_set<string> dfs_seen;
-	std::unordered_set<string> blob_seen;
 	auto push_scope = [&](duckdb::vector<string> &target, std::unordered_set<string> &target_seen,
 	                      const string &scope) {
 		if (scope.empty()) {
@@ -71,25 +67,12 @@ void EnsureHttpBearerSecret(ClientContext &context, OneLakeCatalog &catalog, con
 		}
 		target.push_back(scope);
 	};
-	auto add_scope = [&](const string &scope) {
-		if (scope.empty()) {
-			return;
-		}
-		auto lowered = StringUtil::Lower(scope);
-		if (lowered.find("onelake.blob.") != string::npos) {
-			push_scope(blob_scopes, blob_seen, scope);
-		} else {
-			push_scope(dfs_scopes, dfs_seen, scope);
-		}
-	};
+	auto add_scope = [&](const string &scope) { push_scope(dfs_scopes, dfs_seen, scope); };
 
 	string base_https_dfs = "https://onelake.dfs.fabric.microsoft.com/" + workspace_id;
-	string base_https_blob = "https://onelake.blob.fabric.microsoft.com/" + workspace_id;
 	string base_abfss = "abfss://" + workspace_id + "@onelake.dfs.fabric.microsoft.com";
 	add_scope(base_https_dfs);
 	add_scope(base_https_dfs + "/");
-	add_scope(base_https_blob);
-	add_scope(base_https_blob + "/");
 	add_scope(base_abfss);
 	add_scope(base_abfss + "/");
 
@@ -101,16 +84,11 @@ void EnsureHttpBearerSecret(ClientContext &context, OneLakeCatalog &catalog, con
 		add_scope(base_https_dfs + "/" + identifier + "/");
 		add_scope(base_https_dfs + "/" + identifier + ".Lakehouse");
 		add_scope(base_https_dfs + "/" + identifier + ".Lakehouse/");
-		add_scope(base_https_blob + "/" + identifier);
-		add_scope(base_https_blob + "/" + identifier + "/");
-		add_scope(base_https_blob + "/" + identifier + ".Lakehouse");
-		add_scope(base_https_blob + "/" + identifier + ".Lakehouse/");
 		add_scope(base_abfss + "/" + identifier);
 		add_scope(base_abfss + "/" + identifier + "/");
 		add_scope(base_abfss + "/" + identifier + ".Lakehouse");
 		add_scope(base_abfss + "/" + identifier + ".Lakehouse/");
 		add_scope(base_https_dfs + "/" + identifier + "/Tables");
-		add_scope(base_https_blob + "/" + identifier + "/Tables");
 		add_scope(base_abfss + "/" + identifier + "/Tables");
 	};
 
@@ -123,18 +101,16 @@ void EnsureHttpBearerSecret(ClientContext &context, OneLakeCatalog &catalog, con
 	}
 
 	add_scope(base_https_dfs + "/Tables");
-	add_scope(base_https_blob + "/Tables");
 	add_scope(base_abfss + "/Tables");
 
-	auto register_secret = [&](const duckdb::vector<string> &scope_list, OneLakeTokenAudience audience,
-	                           const string &suffix) {
+	auto register_secret = [&](const duckdb::vector<string> &scope_list) {
 		if (scope_list.empty()) {
 			return;
 		}
-		auto token_value = OneLakeAPI::GetAccessToken(&context, credentials, audience);
-		ONELAKE_LOG_DEBUG(&context, "[delta] Registering %s HTTP bearer secret with %llu scope entries",
-		                  suffix.empty() ? "dfs" : suffix.c_str(), static_cast<long long>(scope_list.size()));
-		auto secret = make_uniq<KeyValueSecret>(scope_list, "http", "config", workspace_id + suffix);
+		auto token_value = OneLakeAPI::GetAccessToken(&context, credentials, OneLakeTokenAudience::OneLakeDfs);
+		ONELAKE_LOG_DEBUG(&context, "[delta] Registering dfs HTTP bearer secret with %llu scope entries",
+		                  static_cast<long long>(scope_list.size()));
+		auto secret = make_uniq<KeyValueSecret>(scope_list, "http", "config", workspace_id);
 		secret->secret_map["bearer_token"] = Value(token_value);
 		secret->redact_keys = {"bearer_token"};
 
@@ -144,8 +120,7 @@ void EnsureHttpBearerSecret(ClientContext &context, OneLakeCatalog &catalog, con
 		                              SecretPersistType::TEMPORARY, SecretManager::TEMPORARY_STORAGE_NAME);
 	};
 
-	register_secret(dfs_scopes, OneLakeTokenAudience::OneLakeDfs, "");
-	register_secret(blob_scopes, OneLakeTokenAudience::OneLakeBlob, "_blob");
+	register_secret(dfs_scopes);
 	ONELAKE_LOG_INFO(&context, "[delta] HTTP bearer secrets prepared for workspace=%s", workspace_id.c_str());
 }
 

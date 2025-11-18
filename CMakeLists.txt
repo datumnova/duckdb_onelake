@@ -28,13 +28,12 @@ find_package(azure-identity-cpp CONFIG REQUIRED)
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
-set(EXTENSION_SOURCES 
+set(EXTENSION_SOURCES_COMMON
     src/onelake_extension.cpp
     src/onelake_api.cpp
     src/onelake_credentials.cpp
     src/onelake_secret.cpp
     src/onelake_catalog.cpp
-    src/onelake_parser_extension.cpp
     src/storage/onelake_storage_extension.cpp
     src/storage/onelake_catalog_set.cpp
     src/storage/onelake_http_util.cpp
@@ -46,9 +45,14 @@ set(EXTENSION_SOURCES
     src/storage/onelake_transaction.cpp
 )
 
+# Parser extension only for loadable extension to avoid symbol conflicts
+set(EXTENSION_SOURCES_LOADABLE
+    ${EXTENSION_SOURCES_COMMON}
+    src/onelake_parser_extension.cpp
+)
 
-build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
-build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
+build_static_extension(${TARGET_NAME} "${EXTENSION_SOURCES_COMMON}")
+build_loadable_extension(${TARGET_NAME} " " "${EXTENSION_SOURCES_LOADABLE}")
 
 set_property(TARGET ${EXTENSION_NAME} PROPERTY CXX_STANDARD 17)
 set_property(TARGET ${EXTENSION_NAME} PROPERTY CXX_STANDARD_REQUIRED ON)
@@ -61,11 +65,17 @@ target_include_directories(
   ${EXTENSION_NAME}
   PRIVATE OpenSSL::SSL OpenSSL::Crypto CURL::libcurl JsonCpp::JsonCpp Azure::azure-identity)
 
+# Loadable extension
 target_link_libraries(
   ${TARGET_NAME}_loadable_extension OpenSSL::SSL OpenSSL::Crypto CURL::libcurl JsonCpp::JsonCpp Azure::azure-identity)
 target_include_directories(
   ${TARGET_NAME}_loadable_extension
   PRIVATE OpenSSL::SSL OpenSSL::Crypto CURL::libcurl JsonCpp::JsonCpp Azure::azure-identity)
+
+# Allow duplicate constexpr static symbols from catalog entry headers
+if(NOT APPLE AND NOT WIN32)
+  target_link_options(${TARGET_NAME}_loadable_extension PRIVATE "LINKER:--allow-multiple-definition")
+endif()
 
 install(
   TARGETS ${EXTENSION_NAME}

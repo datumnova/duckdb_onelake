@@ -1,7 +1,9 @@
 #include "onelake_extension.hpp"
 #include "storage/onelake_storage_extension.hpp"
 #include "onelake_secret.hpp"
+#ifdef DUCKDB_BUILD_LOADABLE_EXTENSION
 #include "onelake_parser_extension.hpp"
+#endif
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/config.hpp"
@@ -10,10 +12,8 @@
 namespace duckdb {
 
 static void LoadInternal(ExtensionLoader &loader) {
-	// Register OneLake secret type
 	RegisterOneLakeSecret(loader);
 
-	// Register storage extension for catalog functionality
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
 	if (config.extension_parameters.find(ONELAKE_ENV_FABRIC_TOKEN_OPTION) == config.extension_parameters.end()) {
 		config.AddExtensionOption(ONELAKE_ENV_FABRIC_TOKEN_OPTION,
@@ -25,15 +25,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 		                          "Environment variable name that stores the OneLake storage access token",
 		                          LogicalType::VARCHAR, Value(ONELAKE_DEFAULT_ENV_STORAGE_TOKEN_VARIABLE));
 	}
-	if (config.extension_parameters.find(ONELAKE_ENV_BLOB_TOKEN_OPTION) == config.extension_parameters.end()) {
-		config.AddExtensionOption(ONELAKE_ENV_BLOB_TOKEN_OPTION,
-		                          "Environment variable name that stores the OneLake blob endpoint access token",
-		                          LogicalType::VARCHAR, Value(ONELAKE_DEFAULT_ENV_BLOB_TOKEN_VARIABLE));
-	}
 	config.storage_extensions["onelake"] = make_uniq<OneLakeStorageExtension>();
+#ifdef DUCKDB_BUILD_LOADABLE_EXTENSION
 	config.parser_extensions.push_back(CreateOneLakeParserExtension());
+#endif
 
-	// Try to auto-load dependencies used for Delta access
 	ExtensionHelper::TryAutoLoadExtension(loader.GetDatabaseInstance(), "httpfs");
 	ExtensionHelper::TryAutoLoadExtension(loader.GetDatabaseInstance(), "delta");
 }
