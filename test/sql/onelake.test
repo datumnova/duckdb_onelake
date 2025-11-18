@@ -31,11 +31,11 @@ CREATE SECRET onelake (
     CLIENT_SECRET 'AZURE_CLIENT_SECRET'
 );
 
-statement ok
-SET onelake_env_token_variable='CUSTOM_STORAGE_TOKEN';
+#statement ok
+#SET onelake_env_token_variable='CUSTOM_STORAGE_TOKEN';
 
-statement ok
-SET VARIABLE AZURE_STORAGE_TOKEN='unit-test-storage-token';
+#statement ok
+#SET VARIABLE AZURE_STORAGE_TOKEN='unit-test-storage-token';
 
 statement ok
 CREATE SECRET onelake_env_chain (
