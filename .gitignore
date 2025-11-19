@@ -8,9 +8,26 @@ test/python/__pycache__/
 .Rhistory
 .vscode/settings.json
 
-# Ignore Python files
-.venv/
+# Python caches and virtualenvs
 __pycache__/
+.venv/
+.venv*/
+.pytest_cache/
+
+# Rust delta writer artifacts
+rust/onelake_delta_writer/target/
+
+# Additional local build outputs
+duckdb/build/
+duckdb/builddebug/
 vcpkg_installed/
 local-test
+
+# Tool-specific caches
+.ruff_cache/
+.mypy_cache/
+
+# Repo-local files
 .github/copilot-instructions.md
+scripts/delta-write-test.py
+docs/create_update_plan.md

@@ -1,4 +1,5 @@
 #include "onelake_api.hpp"
+#include "onelake_logging.hpp"
 #include "storage/onelake_catalog.hpp"
 #include "storage/onelake_http_util.hpp"
 #include "storage/onelake_table_set.hpp"
@@ -21,15 +22,20 @@
 #include "storage/onelake_schema_entry.hpp"
 #include "duckdb/main/client_context.hpp"
 #include <unordered_set>
+#include <memory>
 
 namespace {
 
 using duckdb::ClientContext;
 using duckdb::CreateTableInfo;
+using duckdb::DefaultLogType;
 using duckdb::EnsureHttpBearerSecret;
 using duckdb::Exception;
 using duckdb::ExtensionHelper;
+using duckdb::FunctionData;
 using duckdb::idx_t;
+using duckdb::Logger;
+using duckdb::LogLevel;
 using duckdb::make_uniq;
 using duckdb::OneLakeAPI;
 using duckdb::OneLakeCatalog;
@@ -39,8 +45,29 @@ using duckdb::OneLakeTableSet;
 using duckdb::Printer;
 using duckdb::string;
 using duckdb::StringUtil;
+using duckdb::unique_ptr;
 using duckdb::vector;
 using std::unordered_set;
+
+bool HydrateColumnDefinitions(ClientContext &context, OneLakeTableEntry &table_entry) {
+	if (table_entry.GetColumns().PhysicalColumnCount() > 0) {
+		return true;
+	}
+	try {
+		unique_ptr<FunctionData> temp_bind_data;
+		auto table_function = table_entry.GetScanFunction(context, temp_bind_data);
+		(void)table_function;
+		if (table_entry.GetColumns().PhysicalColumnCount() == 0) {
+			ONELAKE_LOG_WARN(&context, "[catalog] Table '%s' has no columns after binding", table_entry.name.c_str());
+			return false;
+		}
+		return true;
+	} catch (const Exception &ex) {
+		ONELAKE_LOG_WARN(&context, "[catalog] Failed to hydrate columns for OneLake table '%s': %s",
+		                 table_entry.name.c_str(), ex.what());
+		return false;
+	}
+}
 
 string EnsureTrailingSlash(const string &path) {
 	if (path.empty()) {
@@ -85,8 +112,9 @@ vector<string> BuildTableRootCandidates(const OneLakeCatalog &catalog, const One
 	return result;
 }
 
-void AddDiscoveredTable(OneLakeCatalog &catalog, OneLakeSchemaEntry &schema, OneLakeTableSet &table_set,
-                        const string &table_name, const string &format, const string &relative_location) {
+void AddDiscoveredTable(ClientContext &context, OneLakeCatalog &catalog, OneLakeSchemaEntry &schema,
+                        OneLakeTableSet &table_set, const string &table_name, const string &format,
+                        const string &relative_location) {
 	CreateTableInfo info;
 	info.table = table_name;
 	auto table_entry = make_uniq<OneLakeTableEntry>(catalog, schema, info);
@@ -101,6 +129,7 @@ void AddDiscoveredTable(OneLakeCatalog &catalog, OneLakeSchemaEntry &schema, One
 			table_entry->table_data->location = "Tables/" + table_name;
 		}
 	}
+	HydrateColumnDefinitions(context, *table_entry);
 	table_set.CreateEntry(std::move(table_entry));
 }
 
@@ -173,7 +202,7 @@ idx_t DiscoverTablesFromStorage(ClientContext &context, OneLakeCatalog &catalog,
 			} else {
 				relative_location = "Tables/" + leaf;
 			}
-			AddDiscoveredTable(catalog, schema, table_set, leaf, detected_format, relative_location);
+			AddDiscoveredTable(context, catalog, schema, table_set, leaf, detected_format, relative_location);
 			discovered++;
 		}
 	}
@@ -254,6 +283,7 @@ void OneLakeTableSet::LoadEntries(ClientContext &context) {
 			}
 		}
 
+		HydrateColumnDefinitions(context, *table_entry);
 		CreateEntry(std::move(table_entry));
 		seen_names.insert(StringUtil::Lower(table.name));
 		api_count++;

@@ -1,10 +1,14 @@
 #include "storage/onelake_catalog.hpp"
+#include "storage/onelake_insert.hpp"
 #include "storage/onelake_schema_entry.hpp"
+#include "storage/onelake_table_entry.hpp"
 #include "storage/onelake_transaction.hpp"
-#include "duckdb/storage/database_size.hpp"
-#include "duckdb/parser/parsed_data/drop_info.hpp"
-#include "duckdb/parser/parsed_data/create_schema_info.hpp"
+#include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/main/attached_database.hpp"
+#include "duckdb/parser/parsed_data/create_schema_info.hpp"
+#include "duckdb/parser/parsed_data/drop_info.hpp"
+#include "duckdb/planner/operator/logical_insert.hpp"
+#include "duckdb/storage/database_size.hpp"
 
 namespace duckdb {
 
@@ -87,7 +91,22 @@ PhysicalOperator &OneLakeCatalog::PlanCreateTableAs(ClientContext &context, Phys
 
 PhysicalOperator &OneLakeCatalog::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
                                              optional_ptr<PhysicalOperator> plan) {
-	throw NotImplementedException("OneLake catalog does not support INSERT operations");
+	if (!plan) {
+		throw NotImplementedException("INSERT ... DEFAULT VALUES is not supported for OneLake tables yet");
+	}
+	if (op.return_chunk) {
+		throw NotImplementedException("INSERT ... RETURNING is not supported for OneLake tables yet");
+	}
+	if (op.on_conflict_info.action_type != OnConflictAction::THROW) {
+		throw NotImplementedException("INSERT ... ON CONFLICT is not supported for OneLake tables yet");
+	}
+	if (!op.column_index_map.empty()) {
+		plan = &planner.ResolveDefaultsProjection(op, *plan);
+	}
+	auto &table_entry = op.table.Cast<OneLakeTableEntry>();
+	auto &insert = planner.Make<PhysicalOneLakeInsert>(table_entry, *this, op.types, op.estimated_cardinality);
+	insert.children.push_back(*plan);
+	return insert;
 }
 
 PhysicalOperator &OneLakeCatalog::PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner, LogicalDelete &op,

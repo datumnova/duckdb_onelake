@@ -27,6 +27,9 @@ public:
 		return partition_columns;
 	}
 
+	string GetCachedResolvedPath() const;
+	void RememberResolvedPath(const string &path);
+
 private:
 	void UpdateColumnDefinitions(const vector<string> &names, const vector<LogicalType> &types);
 

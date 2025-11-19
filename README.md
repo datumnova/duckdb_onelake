@@ -17,6 +17,7 @@ DISCLAIMER: Currently, this extension is in an experimental phase..
 - Attach multiple lakehouses from the same OneLake workspace.
 - Set a default lakehouse.schema for queries .
 - Query Delta and Iceberg tables stored in OneLake lakehouses with SQL syntax.
+- Append to existing Delta tables via standard DuckDB `INSERT` statements (append-only writes).
 
 ### Current Limitations
 
@@ -89,6 +90,12 @@ SHOW TABLES;
 SELECT * FROM <your_table_name>;
 
 -- SELECT * FROM <your_iceberg_table_name> USING ICEBERG;
+
+-- Append to a Delta table that lives in the current schema
+INSERT INTO people VALUES (1, 'Mark'), (2, 'Hannes');
+-- Or insert the results of another query
+INSERT INTO fact_sales
+SELECT * FROM staging_sales;
 ```
 
 Optionally, you can replace the secret creation and authentication steps by setting the following environment variables before starting the DuckDB shell:
@@ -151,6 +158,23 @@ The `onelake_env_fabric_token_variable` and `onelake_env_storage_token_variable`
 DuckDB setting. Set them *before* `CREATE SECRET` when you want the extension to remember different variable names.
 When left untouched they continue to default to `FABRIC_API_TOKEN` and `AZURE_STORAGE_TOKEN` respectively.
 
+### Writing to OneLake tables
+
+`INSERT` now streams chunks into the Delta writer that ships with this repository. A few tips:
+
+- **Target format**: writes are currently limited to Delta tables that already exist in the lakehouse. Iceberg writes
+    remain read-only for now.
+- **Schema alignment**: DuckDB reuses the table schema discovered during `ATTACH`, so column order and types must match.
+    Use an explicit column list (`INSERT INTO people(id, name) VALUES ...`) when you need to reorder or omit columns.
+- **Authentication**: the same secrets created for reading are reused for writes. No extra configuration is required
+    beyond ensuring the service principal (or issued token) has write permissions in the lakehouse.
+- **Row count**: the DuckDB shell shows a single-row result with the number of appended rows (e.g., `2`). If you are
+    running in a non-interactive context, capture the result set to read the inserted row count.
+
+Any insertable DuckDB query works, including `INSERT INTO table SELECT ...` pipelines and parameterized statements. The
+extension batches the input into Arrow streams and hands them to the Rust-based Delta writer, so large inserts benefit
+from DuckDB's vectorized execution without additional configuration.
+
 ## Building
 ### Managing dependencies
 DuckDB extensions uses VCPKG for dependency management. Enabling VCPKG is very simple: follow the [installation instructions](https://vcpkg.io/en/getting-started) or just run the following:
@@ -175,3 +199,30 @@ The main binaries that will be built are:
 - `duckdb` is the binary for the duckdb shell with the extension code automatically loaded.
 - `unittest` is the test runner of duckdb. Again, the extension is already linked into the binary.
 - `onelake.duckdb_extension` is the loadable binary as it would be distributed.
+
+### Rust delta writer prerequisites
+
+Write support is implemented in a companion Rust crate (`rust/onelake_delta_writer`) that exposes a
+static library consumed by the C++ extension. CMake runs `cargo build --release` automatically, so
+remote builds keep working as long as the builder image has `cargo` available. For local builds you
+must install a Rust toolchain once (the default stable channel is sufficient):
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+rustup update stable
+```
+
+After installing Rust, re-run `make` and the build will place `libonelake_delta_writer.a` plus the
+generated C header under `build/release/onelake_delta_writer/`, making the C++ library available.
+
+To iterate on the Rust writer itself (for example before running an end-to-end local build) you can
+use the crate's standard workflow:
+
+```sh
+cd rust/onelake_delta_writer
+SKIP_ONELAKE_HEADER=1 cargo test
+```
+
+Setting `SKIP_ONELAKE_HEADER=1` skips header generation during tests, which keeps the inner loop
+fast while still exercising the Delta writer logic.

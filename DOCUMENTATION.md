@@ -6,6 +6,7 @@
 - [Authentication System](#authentication-system)
 - [Database Attachment Process](#database-attachment-process)
 - [Table Discovery and Selection](#table-discovery-and-selection)
+- [Delta Write Pipeline](#delta-write-pipeline)
 - [Apache Iceberg Support](#apache-iceberg-support)
 - [Code Reference](#code-reference)
 - [API Integration](#api-integration)
@@ -13,7 +14,7 @@
 
 ## Overview
 
-The DuckDB OneLake extension enables seamless integration between DuckDB and Microsoft Fabric's OneLake, allowing users to query both Delta Lake and Apache Iceberg tables stored in OneLake lakehouses directly from DuckDB. This extension provides a read-only interface to OneLake data, leveraging DuckDB's powerful SQL capabilities while maintaining secure authentication through Azure Active Directory.
+The DuckDB OneLake extension enables seamless integration between DuckDB and Microsoft Fabric's OneLake, allowing users to query both Delta Lake and Apache Iceberg tables stored in OneLake lakehouses directly from DuckDB. In addition to querying, the extension now supports **append-only INSERT statements into existing Delta tables**, leveraging DuckDB's powerful SQL capabilities while maintaining secure authentication through Azure Active Directory.
 
 ### Key Features
 
@@ -23,6 +24,7 @@ The DuckDB OneLake extension enables seamless integration between DuckDB and Mic
 - **Schema Discovery**: Automatic discovery of lakehouses  and tables within workspaces
 - **Advanced Query Syntax**: Support for explicit format specification with `USING ICEBERG` syntax
 - **Secure Access**: Full integration with Azure Active Directory for secure data access
+- **Delta Write Support**: Append-only `INSERT` pipelines that stream DuckDB chunks into the bundled Rust Delta writer
 
 ```mermaid
 graph TD
@@ -591,6 +593,40 @@ graph TB
     T5 --> DT5
 ```
 
+## Delta Write Pipeline
+
+Append-only writes reuse DuckDB's `INSERT` planning pipeline with a bespoke physical operator that batches rows and
+hands them to the Rust `deltalake` writer.
+
+1. **Planner hook** – When a bound table belongs to a OneLake catalog, `OneLakeCatalog::PlanInsert` swaps the default
+    `PhysicalInsert` for `PhysicalOneLakeInsert`. The operator keeps all logical children untouched, so any complex
+    `SELECT` feeding the insert still runs inside DuckDB.
+2. **Buffering** – Each thread appends incoming chunks into a shared `ColumnDataCollection`. The collection preserves
+    the table's logical column names (captured during catalog load) so the Arrow schema exactly matches the Delta table.
+3. **Finalize** – Once all input is consumed, `PhysicalOneLakeInsert::Finalize` resolves the table's ABFSS URI,
+    serializes partition columns, and packages credentials/options as JSON payloads for the writer.
+4. **Rust hand-off** – `OneLakeDeltaWriter::Append` wraps each chunk in a temporary `ArrowArrayStream` and invokes the
+    FFI entry point `ol_delta_append`. The Rust crate registers Azure handlers, opens the Delta table via
+    `deltalake::operations::write::write_batches`, and streams the Arrow batches into storage.
+5. **Row count output** – DuckDB expects `INSERT` to behave like a source. `PhysicalOneLakeInsert` therefore exposes a
+    miniature source interface that emits a single row containing the number of appended tuples. Interactive shells show
+    that row (e.g., `2`) once the write finishes; programmatic callers can fetch the result set to obtain the count.
+
+### Payloads passed to the writer
+
+- **Table URI** – An ABFSS location such as
+  `abfss://workspace@onelake.dfs.fabric.microsoft.com/lakehouse.Lakehouse/Tables/people`.
+- **Token JSON** – `{ "storageToken": "<dfs_scope_token>" }`, reused by `httpfs` and the Rust writer.
+- **Options JSON** – `{ "mode": "append", "partitionColumns": ["..." ] }`, leaving room for future write modes.
+
+### Operational notes
+
+- Only Delta tables are writable today; Iceberg remains read-only.
+- Writes are append-only. `UPDATE`, `DELETE`, and table-creation statements still raise `NotImplementedException`.
+- The service principal or issued token must be authorized to write to the lakehouse's `Tables/` container; DFS errors
+  bubble up through the writer as `DeltaError` messages.
+- If table schemas change externally, re-run `ATTACH` (or `DETACH/ATTACH`) to refresh column metadata before inserting.
+
 ## Apache Iceberg Support
 
 The OneLake extension provides comprehensive support for Apache Iceberg tables alongside traditional Delta Lake tables. This enables users to query Iceberg tables stored in OneLake lakehouses using either automatic format detection or explicit syntax.
@@ -1081,9 +1117,9 @@ The Iceberg integration prioritizes native ABFS paths for better compatibility w
 
 ### Current Limitations
 
-1. **Read-Only Access**: The extension currently only supports SELECT operations
-   - No INSERT, UPDATE, DELETE, or CREATE TABLE support
-   - Implementation in `OneLakeCatalog` throws `NotImplementedException` for these operations
+1. **Append-Only Writes**: Only Delta tables support `INSERT` and they are strictly append-only
+    - UPDATE, DELETE, CREATE TABLE AS, and schema-altering statements still throw `NotImplementedException`
+    - Iceberg tables remain read-only for now
 
 2. **Schema-Enabled Lakehouses**: Currently incompatible due to Fabric API limitations
    - See: [Lakehouse Schemas Public Preview Limitations](https://learn.microsoft.com/en-us/fabric/data-engineering/lakehouse-schemas#public-preview-limitations)
@@ -1097,13 +1133,9 @@ The Iceberg integration prioritizes native ABFS paths for better compatibility w
 
 ### Future Enhancements
 
-#### Write Operations Support
-```sql
--- Potential future functionality
-INSERT INTO onelake.lakehouse.table SELECT * FROM local_table;
-CREATE TABLE onelake.lakehouse.new_table AS SELECT * FROM source;
-UPDATE onelake.lakehouse.table SET column = value WHERE condition;
-```
+#### Extended Write Operations
+- Support for Iceberg inserts, CTAS, and overwrite modes
+- Declarative MERGE/UPDATE/DELETE once the Fabric APIs and storage semantics are available
 
 #### Enhanced Authentication
 - Managed Identity support for Azure-hosted environments

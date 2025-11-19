@@ -1,0 +1,14 @@
+language = "C"
+include_guard = "ONELAKE_DELTA_WRITER_H"
+pragma_once = true
+
+defines = {}
+
+[parse]
+parse_deps = false
+[export]
+include = ["OlDeltaStatus"]
+
+[fn]
+
+
