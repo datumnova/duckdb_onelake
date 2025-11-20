@@ -59,14 +59,66 @@ set(EXTENSION_SOURCES_LOADABLE
 set(RUST_CRATE_DIR ${CMAKE_CURRENT_LIST_DIR}/rust/onelake_delta_writer)
 set(RUST_BUILD_DIR ${CMAKE_BINARY_DIR}/onelake_delta_writer)
 set(RUST_HEADER ${RUST_BUILD_DIR}/include/onelake_delta_writer.h)
-set(RUST_LIB ${RUST_BUILD_DIR}/lib/libonelake_delta_writer.a)
+set(RUST_TARGET_TRIPLE "")
+
+if(APPLE)
+  set(REQUESTED_OSX_ARCH "")
+  if(CMAKE_OSX_ARCHITECTURES)
+    list(LENGTH CMAKE_OSX_ARCHITECTURES OSX_ARCH_COUNT)
+    if(OSX_ARCH_COUNT GREATER 1)
+      message(FATAL_ERROR "Building the OneLake extension for multiple macOS architectures simultaneously is not supported. Requested architectures: ${CMAKE_OSX_ARCHITECTURES}")
+    endif()
+    list(GET CMAKE_OSX_ARCHITECTURES 0 REQUESTED_OSX_ARCH)
+  endif()
+
+  if(NOT REQUESTED_OSX_ARCH)
+    set(REQUESTED_OSX_ARCH ${CMAKE_SYSTEM_PROCESSOR})
+  endif()
+
+  string(TOLOWER "${REQUESTED_OSX_ARCH}" REQUESTED_OSX_ARCH_LOWER)
+  if(REQUESTED_OSX_ARCH_LOWER STREQUAL "x86_64" OR REQUESTED_OSX_ARCH_LOWER STREQUAL "amd64")
+    set(RUST_TARGET_TRIPLE "x86_64-apple-darwin")
+  elseif(REQUESTED_OSX_ARCH_LOWER STREQUAL "arm64" OR REQUESTED_OSX_ARCH_LOWER STREQUAL "aarch64")
+    set(RUST_TARGET_TRIPLE "aarch64-apple-darwin")
+  else()
+    message(FATAL_ERROR "Unsupported macOS architecture '${REQUESTED_OSX_ARCH}'.")
+  endif()
+elseif(WIN32)
+  set(RUST_TARGET_TRIPLE "x86_64-pc-windows-msvc")
+endif()
+
+if(WIN32)
+  set(RUST_LIB_FILENAME onelake_delta_writer.lib)
+else()
+  set(RUST_LIB_FILENAME libonelake_delta_writer.a)
+endif()
+
+if(RUST_TARGET_TRIPLE)
+  set(RUST_TARGET_RELEASE_DIR ${RUST_CRATE_DIR}/target/${RUST_TARGET_TRIPLE}/release)
+else()
+  set(RUST_TARGET_RELEASE_DIR ${RUST_CRATE_DIR}/target/release)
+endif()
+
+set(RUST_LIB_SOURCE ${RUST_TARGET_RELEASE_DIR}/${RUST_LIB_FILENAME})
+set(RUST_LIB ${RUST_BUILD_DIR}/lib/${RUST_LIB_FILENAME})
+
+set(CARGO_BUILD_ARGS --manifest-path ${RUST_CRATE_DIR}/Cargo.toml --release)
+if(RUST_TARGET_TRIPLE)
+  list(APPEND CARGO_BUILD_ARGS --target ${RUST_TARGET_TRIPLE})
+endif()
+
+set(RUST_TARGET_PREBUILD_COMMAND)
+if(RUST_TARGET_TRIPLE)
+  set(RUST_TARGET_PREBUILD_COMMAND COMMAND rustup target add ${RUST_TARGET_TRIPLE})
+endif()
 
 add_custom_command(
   OUTPUT ${RUST_LIB} ${RUST_HEADER}
   COMMAND ${CMAKE_COMMAND} -E make_directory ${RUST_BUILD_DIR}/lib
   COMMAND ${CMAKE_COMMAND} -E make_directory ${RUST_BUILD_DIR}/include
-  COMMAND ${CMAKE_COMMAND} -E env ONELAKE_HEADER_DIR=${RUST_BUILD_DIR}/include cargo build --manifest-path ${RUST_CRATE_DIR}/Cargo.toml --release
-  COMMAND ${CMAKE_COMMAND} -E copy ${RUST_CRATE_DIR}/target/release/libonelake_delta_writer.a ${RUST_LIB}
+  ${RUST_TARGET_PREBUILD_COMMAND}
+  COMMAND ${CMAKE_COMMAND} -E env ONELAKE_HEADER_DIR=${RUST_BUILD_DIR}/include cargo build ${CARGO_BUILD_ARGS}
+  COMMAND ${CMAKE_COMMAND} -E copy ${RUST_LIB_SOURCE} ${RUST_LIB}
   WORKING_DIRECTORY ${RUST_CRATE_DIR}
   DEPENDS ${RUST_CRATE_DIR}/src/lib.rs ${RUST_CRATE_DIR}/Cargo.toml ${RUST_CRATE_DIR}/build.rs
   VERBATIM
