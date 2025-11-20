@@ -203,6 +203,7 @@ The main binaries that will be built are:
 #### Platform-specific notes
 
 - **macOS cross-compilation**: the Rust-based Delta writer now follows the architecture requested through `CMAKE_OSX_ARCHITECTURES`. If you are building Intel artifacts from an Apple Silicon host, pass `-DCMAKE_OSX_ARCHITECTURES=x86_64` (or `arm64` for native builds) when configuring DuckDB. The build invokes `rustup target add <triple>` automatically, so `rustup` must be available on the PATH.
+- **macOS deployment target**: Cargo inherits `MACOSX_DEPLOYMENT_TARGET`, so the build injects a default of `11.0` whenever `CMAKE_OSX_DEPLOYMENT_TARGET` is unset. Override it via `-DCMAKE_OSX_DEPLOYMENT_TARGET=12.3` (for example) if you need a newer baseline to match your distribution policy.
 - **Windows builds**: the same Rust target detection produces a `.lib` that matches MSVC expectations, so no manual renaming is required. Simply run the standard `make` (or the corresponding CMake/Ninja invocation) inside a Developer Command Prompt.
 
 ### Rust delta writer prerequisites

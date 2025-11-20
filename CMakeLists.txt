@@ -112,12 +112,22 @@ if(RUST_TARGET_TRIPLE)
   set(RUST_TARGET_PREBUILD_COMMAND COMMAND rustup target add ${RUST_TARGET_TRIPLE})
 endif()
 
+set(RUST_ENV_VARS ONELAKE_HEADER_DIR=${RUST_BUILD_DIR}/include)
+if(APPLE)
+  if(CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(RUST_MACOS_DEPLOYMENT_TARGET ${CMAKE_OSX_DEPLOYMENT_TARGET})
+  else()
+    set(RUST_MACOS_DEPLOYMENT_TARGET "11.0")
+  endif()
+  list(APPEND RUST_ENV_VARS MACOSX_DEPLOYMENT_TARGET=${RUST_MACOS_DEPLOYMENT_TARGET})
+endif()
+
 add_custom_command(
   OUTPUT ${RUST_LIB} ${RUST_HEADER}
   COMMAND ${CMAKE_COMMAND} -E make_directory ${RUST_BUILD_DIR}/lib
   COMMAND ${CMAKE_COMMAND} -E make_directory ${RUST_BUILD_DIR}/include
   ${RUST_TARGET_PREBUILD_COMMAND}
-  COMMAND ${CMAKE_COMMAND} -E env ONELAKE_HEADER_DIR=${RUST_BUILD_DIR}/include cargo build ${CARGO_BUILD_ARGS}
+  COMMAND ${CMAKE_COMMAND} -E env ${RUST_ENV_VARS} cargo build ${CARGO_BUILD_ARGS}
   COMMAND ${CMAKE_COMMAND} -E copy ${RUST_LIB_SOURCE} ${RUST_LIB}
   WORKING_DIRECTORY ${RUST_CRATE_DIR}
   DEPENDS ${RUST_CRATE_DIR}/src/lib.rs ${RUST_CRATE_DIR}/Cargo.toml ${RUST_CRATE_DIR}/build.rs
@@ -136,18 +146,20 @@ set_property(TARGET ${EXTENSION_NAME} PROPERTY CXX_STANDARD_REQUIRED ON)
 set_property(TARGET ${LOADABLE_EXTENSION_NAME} PROPERTY CXX_STANDARD 17)
 set_property(TARGET ${LOADABLE_EXTENSION_NAME} PROPERTY CXX_STANDARD_REQUIRED ON)
 
+find_package(BZip2 REQUIRED)
+
 # Static Lib
 add_dependencies(${EXTENSION_NAME} onelake_delta_writer)
 add_dependencies(${LOADABLE_EXTENSION_NAME} onelake_delta_writer)
 
-target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto CURL::libcurl JsonCpp::JsonCpp Azure::azure-identity ${RUST_LIB})
+target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto CURL::libcurl JsonCpp::JsonCpp Azure::azure-identity BZip2::BZip2 ${RUST_LIB})
 target_include_directories(
   ${EXTENSION_NAME}
   PRIVATE OpenSSL::SSL OpenSSL::Crypto CURL::libcurl JsonCpp::JsonCpp Azure::azure-identity ${RUST_BUILD_DIR}/include)
 
 # Loadable extension
 target_link_libraries(
-  ${TARGET_NAME}_loadable_extension OpenSSL::SSL OpenSSL::Crypto CURL::libcurl JsonCpp::JsonCpp Azure::azure-identity ${RUST_LIB})
+  ${TARGET_NAME}_loadable_extension OpenSSL::SSL OpenSSL::Crypto CURL::libcurl JsonCpp::JsonCpp Azure::azure-identity BZip2::BZip2 ${RUST_LIB})
 target_include_directories(
   ${TARGET_NAME}_loadable_extension
   PRIVATE OpenSSL::SSL OpenSSL::Crypto CURL::libcurl JsonCpp::JsonCpp Azure::azure-identity ${RUST_BUILD_DIR}/include)

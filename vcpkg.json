@@ -4,6 +4,7 @@
     "openssl",
     "curl",
     "jsoncpp",
+    "bzip2",
     "azure-identity-cpp",
     {
       "name": "azure-core-cpp",
