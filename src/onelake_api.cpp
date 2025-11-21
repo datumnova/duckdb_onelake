@@ -10,9 +10,11 @@
 #include <curl/curl.h>
 #include <json/json.h>
 #include <unordered_set>
+#include <unordered_map>
 #include <memory>
 #include <chrono>
 #include <iostream>
+#include <mutex>
 
 namespace duckdb {
 
@@ -100,6 +102,7 @@ string ComposeLeaf(const string &base_path, const string &full_name) {
 
 } // namespace
 
+static const char *DELTA_TABLE_API_BASE = "https://onelake.table.fabric.microsoft.com/delta";
 static const char *ICEBERG_TABLE_API_BASE = "https://onelake.table.fabric.microsoft.com/iceberg";
 static const char *FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default";
 static const char *DFS_SCOPE = "https://storage.azure.com/.default";
@@ -193,6 +196,45 @@ static const string &ScopeForAudience(OneLakeTokenAudience audience) {
 	}
 }
 
+static string NormalizeCatalogName(const string &lakehouse_name) {
+	if (lakehouse_name.empty()) {
+		return string();
+	}
+	if (StringUtil::EndsWith(lakehouse_name, ".Lakehouse")) {
+		return lakehouse_name;
+	}
+	return lakehouse_name + ".Lakehouse";
+}
+
+static string ConvertHttpsLocationToAbfss(const string &storage_location) {
+	const string https_prefix = "https://onelake.dfs.fabric.microsoft.com/";
+	if (!StringUtil::StartsWith(storage_location, https_prefix)) {
+		return storage_location;
+	}
+	string path_part = storage_location.substr(https_prefix.size());
+	auto slash_pos = path_part.find('/');
+	if (slash_pos == string::npos) {
+		return storage_location;
+	}
+	string workspace_part = path_part.substr(0, slash_pos);
+	string remaining_path = path_part.substr(slash_pos + 1);
+	return "abfss://" + workspace_part + "@onelake.dfs.fabric.microsoft.com/" + remaining_path;
+}
+
+static string BuildUnityCatalogBase(const string &workspace_id, const string &lakehouse_id) {
+	if (workspace_id.empty() || lakehouse_id.empty()) {
+		return string();
+	}
+	return string(DELTA_TABLE_API_BASE) + "/" + workspace_id + "/" + lakehouse_id + "/api/2.1/unity-catalog";
+}
+
+static string FormatUnityCatalogIdentifier(const string &schema_name, const string &table_name) {
+	if (schema_name.empty()) {
+		return table_name;
+	}
+	return schema_name + "." + table_name;
+}
+
 static string PerformBearerGet(const string &url, const string &token, long timeout_seconds = 60L) {
 	CURL *curl = curl_easy_init();
 	if (!curl) {
@@ -225,6 +267,154 @@ static string PerformBearerGet(const string &url, const string &token, long time
 	}
 
 	return response_string;
+}
+
+static string ResolveIcebergCatalogPrefix(const string &workspace_id, const OneLakeLakehouse &lakehouse,
+	                                       OneLakeCredentials &credentials) {
+	string warehouse = BuildWarehouseScope(workspace_id, lakehouse);
+	if (warehouse.empty()) {
+		return string();
+	}
+	static std::mutex prefix_lock;
+	static std::unordered_map<string, string> prefix_cache;
+	{
+		std::lock_guard<std::mutex> guard(prefix_lock);
+		auto it = prefix_cache.find(warehouse);
+		if (it != prefix_cache.end()) {
+			return it->second;
+		}
+	}
+
+	string prefix = warehouse;
+	try {
+		string token = OneLakeAPI::GetAccessToken(credentials, OneLakeTokenAudience::OneLakeDfs);
+		string config_url = string(ICEBERG_TABLE_API_BASE) + "/v1/config?warehouse=" + UrlEncodeComponent(warehouse);
+		string config_response = PerformBearerGet(config_url, token);
+		Json::Value config_json;
+		Json::Reader reader;
+		if (reader.parse(config_response, config_json)) {
+			if (config_json.isMember("overrides") && config_json["overrides"].isObject()) {
+				const auto &overrides = config_json["overrides"];
+				if (overrides.isMember("prefix") && overrides["prefix"].isString()) {
+					prefix = overrides["prefix"].asString();
+				}
+			}
+		}
+	} catch (const Exception &) {
+		// Ignore prefix discovery failures and fall back to the warehouse identifier
+	}
+
+	{
+		std::lock_guard<std::mutex> guard(prefix_lock);
+		prefix_cache[warehouse] = prefix;
+	}
+	return prefix;
+}
+
+static bool TryFetchDeltaTableInfo(const string &workspace_id, const OneLakeLakehouse &lakehouse,
+	                                const string &schema_name, const string &table_name,
+	                                OneLakeCredentials &credentials, OneLakeTableInfo &out) {
+	if (workspace_id.empty() || lakehouse.id.empty() || table_name.empty()) {
+		return false;
+	}
+	auto base = BuildUnityCatalogBase(workspace_id, lakehouse.id);
+	if (base.empty()) {
+		return false;
+	}
+	string table_identifier = FormatUnityCatalogIdentifier(schema_name, table_name);
+	string url = base + "/tables/" + UrlEncodeComponent(table_identifier);
+	string catalog_name = NormalizeCatalogName(lakehouse.name);
+	if (!catalog_name.empty()) {
+		url += "?catalog_name=" + UrlEncodeComponent(catalog_name);
+	}
+	string token = OneLakeAPI::GetAccessToken(credentials, OneLakeTokenAudience::OneLakeDfs);
+	string response = PerformBearerGet(url, token);
+	Json::Value root;
+	Json::Reader reader;
+	if (!reader.parse(response, root)) {
+		throw InvalidInputException("Failed to parse Unity Catalog table response");
+	}
+	out.has_metadata = true;
+	if (root.isMember("name") && root["name"].isString()) {
+		out.name = root["name"].asString();
+	}
+	if (root.isMember("data_source_format") && root["data_source_format"].isString()) {
+		out.format = root["data_source_format"].asString();
+	} else if (root.isMember("table_format") && root["table_format"].isString()) {
+		out.format = root["table_format"].asString();
+	} else {
+		out.format = "Delta";
+	}
+	if (root.isMember("storage_location") && root["storage_location"].isString()) {
+		out.location = ConvertHttpsLocationToAbfss(root["storage_location"].asString());
+	} else if (root.isMember("location") && root["location"].isString()) {
+		out.location = ConvertHttpsLocationToAbfss(root["location"].asString());
+	}
+	out.partition_columns.clear();
+	if (root.isMember("partition_columns") && root["partition_columns"].isArray()) {
+		for (const auto &col : root["partition_columns"]) {
+			if (col.isString()) {
+				out.partition_columns.push_back(col.asString());
+			}
+		}
+	}
+	return true;
+}
+
+static bool TryFetchIcebergTableInfo(const string &workspace_id, const OneLakeLakehouse &lakehouse,
+	                                  const string &schema_name, const string &table_name,
+	                                  OneLakeCredentials &credentials, OneLakeTableInfo &out) {
+	if (workspace_id.empty() || table_name.empty()) {
+		return false;
+	}
+	string prefix = ResolveIcebergCatalogPrefix(workspace_id, lakehouse, credentials);
+	if (prefix.empty()) {
+		return false;
+	}
+	vector<string> namespace_parts;
+	if (!schema_name.empty()) {
+		namespace_parts = StringUtil::Split(schema_name, '.');
+	}
+	vector<string> suffix = {"namespaces"};
+	suffix.insert(suffix.end(), namespace_parts.begin(), namespace_parts.end());
+	suffix.push_back("tables");
+	suffix.push_back(table_name);
+	string path = BuildIcebergPath(prefix, suffix);
+	string url = string(ICEBERG_TABLE_API_BASE) + "/" + path;
+	string token = OneLakeAPI::GetAccessToken(credentials, OneLakeTokenAudience::OneLakeDfs);
+	string response = PerformBearerGet(url, token);
+	Json::Value root;
+	Json::Reader reader;
+	if (!reader.parse(response, root)) {
+		throw InvalidInputException("Failed to parse Iceberg table response");
+	}
+	out.has_metadata = true;
+	out.format = "Iceberg";
+	out.name = table_name;
+	if (root.isMember("metadata-location") && root["metadata-location"].isString()) {
+		out.location = root["metadata-location"].asString();
+	}
+	if (root.isMember("metadata") && root["metadata"].isObject()) {
+		const auto &metadata = root["metadata"];
+		if (metadata.isMember("location") && metadata["location"].isString()) {
+			out.location = metadata["location"].asString();
+		}
+		if (metadata.isMember("partition-spec") && metadata["partition-spec"].isArray()) {
+			out.partition_columns.clear();
+			for (const auto &field : metadata["partition-spec"]) {
+				if (!field.isObject()) {
+					continue;
+				}
+				if (field.isMember("fieldName") && field["fieldName"].isString()) {
+					out.partition_columns.push_back(field["fieldName"].asString());
+				}
+			}
+		}
+	}
+	if (!out.location.empty()) {
+		out.location = ConvertHttpsLocationToAbfss(out.location);
+	}
+	return true;
 }
 
 static vector<vector<string>> IcebergListNamespaces(const string &prefix, const string &token) {
@@ -983,29 +1173,7 @@ vector<OneLakeTable> OneLakeAPI::GetTablesFromSchema(ClientContext &context, con
 
 				if (table_json.isMember("storage_location")) {
 					string storage_location = table_json["storage_location"].asString();
-					if (StringUtil::StartsWith(storage_location, "https://")) {
-						// Convert from
-						// https://onelake.dfs.fabric.microsoft.com/<workspaceID>/<LakehouseID>/Tables/<schema>/<table_name>
-						// to
-						// abfss://<workspaceID>@onelake.dfs.fabric.microsoft.com/<LakehouseID>/Tables/<schema>/<table_name>
-						const string https_prefix = "https://onelake.dfs.fabric.microsoft.com/";
-						if (StringUtil::StartsWith(storage_location, https_prefix)) {
-							string path_part = storage_location.substr(https_prefix.size());
-							auto slash_pos = path_part.find('/');
-							if (slash_pos != string::npos) {
-								string workspace_part = path_part.substr(0, slash_pos);
-								string remaining_path = path_part.substr(slash_pos + 1);
-								table.location =
-								    "abfss://" + workspace_part + "@onelake.dfs.fabric.microsoft.com/" + remaining_path;
-							} else {
-								table.location = storage_location;
-							}
-						} else {
-							table.location = storage_location;
-						}
-					} else {
-						table.location = storage_location;
-					}
+					table.location = ConvertHttpsLocationToAbfss(storage_location);
 				}
 
 				tables.push_back(std::move(table));
@@ -1019,58 +1187,38 @@ vector<OneLakeTable> OneLakeAPI::GetTablesFromSchema(ClientContext &context, con
 }
 
 OneLakeTableInfo OneLakeAPI::GetTableInfo(ClientContext &context, const string &workspace_id,
-                                          const string &lakehouse_id, const string &table_name,
-                                          OneLakeCredentials &credentials) {
+	                                      const OneLakeLakehouse &lakehouse, const string &schema_name,
+	                                      const string &table_name, const string &format_hint,
+	                                      OneLakeCredentials &credentials) {
+	(void)context;
+
 	OneLakeTableInfo table_info;
 	table_info.name = table_name;
-	table_info.format = "Delta";
-
-	string url = BuildAPIUrl(workspace_id, "lakehouses/" + lakehouse_id + "/tables/" + table_name);
-	string response = MakeAPIRequest(context, url, credentials, true);
-	if (response.empty()) {
-		// Endpoint not available for this table; fall back to defaults
-		return table_info;
+	if (!format_hint.empty()) {
+		table_info.format = format_hint;
+	} else {
+		table_info.format = "Delta";
 	}
-
-	try {
-		Json::Value root;
-		Json::Reader reader;
-
-		if (!reader.parse(response, root)) {
-			throw InvalidInputException("Failed to parse JSON table info response");
-		}
-
-		if (root.isMember("error")) {
-			const auto &error_obj = root["error"];
-			if (error_obj.isObject() && error_obj.isMember("message")) {
-				throw InvalidInputException("OneLake API error while fetching table '%s': %s", table_name,
-				                            error_obj["message"].asString());
-			}
-			throw InvalidInputException("OneLake API error while fetching table '%s': %s", table_name,
-			                            error_obj.toStyledString());
-		}
-
-		table_info.has_metadata = true;
-		if (root.isMember("name") && root["name"].isString()) {
-			table_info.name = root["name"].asString();
-		}
-		if (root.isMember("format") && root["format"].isString()) {
-			table_info.format = root["format"].asString();
-		}
-		if (root.isMember("location") && root["location"].isString()) {
-			table_info.location = root["location"].asString();
-		}
-
-		// Get partition columns if available
-		if (root.isMember("partitionColumns") && root["partitionColumns"].isArray()) {
-			for (const auto &col : root["partitionColumns"]) {
-				table_info.partition_columns.push_back(col.asString());
-			}
-		}
-	} catch (const std::exception &e) {
-		throw InvalidInputException("Failed to parse table info response: %s", e.what());
+	bool prefer_iceberg = StringUtil::CIEquals(table_info.format, "iceberg");
+	bool success = false;
+	if (prefer_iceberg) {
+		success = TryFetchIcebergTableInfo(workspace_id, lakehouse, schema_name, table_name, credentials, table_info);
+	} else {
+		success = TryFetchDeltaTableInfo(workspace_id, lakehouse, schema_name, table_name, credentials, table_info);
 	}
-
+	if (!success && !prefer_iceberg) {
+		// If the caller did not specify a schema, attempting the Iceberg endpoint can still succeed for
+		// mixed Lakehouses.
+		success = TryFetchIcebergTableInfo(workspace_id, lakehouse, schema_name, table_name, credentials, table_info);
+	}
+	if (!success && prefer_iceberg) {
+		// Allow Delta fallback for Iceberg hints in environments where the Iceberg API is disabled.
+		success = TryFetchDeltaTableInfo(workspace_id, lakehouse, schema_name, table_name, credentials, table_info);
+	}
+	if (!success) {
+		table_info.has_metadata = false;
+		table_info.partition_columns.clear();
+	}
 	return table_info;
 }
 

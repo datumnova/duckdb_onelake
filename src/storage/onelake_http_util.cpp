@@ -109,7 +109,7 @@ void EnsureHttpBearerSecret(ClientContext &context, OneLakeCatalog &catalog, con
 		if (scope_list.empty()) {
 			return;
 		}
-		auto token_value = OneLakeAPI::GetAccessToken(&context, credentials, OneLakeTokenAudience::OneLakeDfs);
+		auto token_value = OneLakeAPI::GetAccessToken(credentials, OneLakeTokenAudience::OneLakeDfs);
 		ONELAKE_LOG_DEBUG(&context, "[delta] Registering dfs HTTP bearer secret with %llu scope entries",
 		                  static_cast<long long>(scope_list.size()));
 		auto secret = make_uniq<KeyValueSecret>(scope_list, "http", "config", workspace_id);

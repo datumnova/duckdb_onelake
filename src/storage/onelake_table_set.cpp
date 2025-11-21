@@ -202,18 +202,15 @@ void OneLakeTableSet::LoadEntries(ClientContext &context) {
 		throw InternalException("Schema data not available for OneLake schema");
 	}
 
-	auto lakehouse_id = schema.schema_data->id;
-	auto lakehouse_name = schema.schema_data->name;
-
-	// Printer::Print(StringUtil::Format("[onelake] loading tables for lakehouse '%s' (id=%s)", lakehouse_name,
-	//                                   lakehouse_id.empty() ? "<unknown>" : lakehouse_id));
+	// Printer::Print(StringUtil::Format("[onelake] loading tables for lakehouse '%s'", schema.schema_data->name));
 
 	// Get tables from the OneLake API
 	auto &credentials = onelake_catalog.GetCredentials();
 	auto tables = OneLakeAPI::GetTables(context, onelake_catalog.GetWorkspaceId(), *schema.schema_data, credentials);
 	std::unordered_set<string> seen_names;
 	idx_t api_count = 0;
-	detail_endpoint_supported = true;
+	delta_detail_supported = true;
+	iceberg_detail_supported = true;
 	detail_endpoint_reported = false;
 
 	for (auto &table : tables) {
@@ -230,20 +227,15 @@ void OneLakeTableSet::LoadEntries(ClientContext &context) {
 		bool is_iceberg_table = StringUtil::CIEquals(table_entry->table_data->format, "iceberg");
 
 		OneLakeTableInfo table_info;
-		if (detail_endpoint_supported && !is_iceberg_table) {
+		bool &detail_flag = is_iceberg_table ? iceberg_detail_supported : delta_detail_supported;
+		if (detail_flag && schema.schema_data) {
 			try {
-				table_info = OneLakeAPI::GetTableInfo(context, onelake_catalog.GetWorkspaceId(), lakehouse_id,
-				                                      table.name, credentials);
-				if (!table_info.has_metadata) {
-					detail_endpoint_supported = false;
-					if (!detail_endpoint_reported) {
-						// Printer::Print("[onelake] table detail endpoint returned no metadata; continuing without
-						// it");
-						detail_endpoint_reported = true;
-					}
-				}
+				table_info = OneLakeAPI::GetTableInfo(context, onelake_catalog.GetWorkspaceId(), *schema.schema_data,
+				                                  schema.name, table.name, table_entry->table_data->format,
+				                                  credentials);
 			} catch (const Exception &ex) {
-				detail_endpoint_supported = false;
+				(void)ex;
+				detail_flag = false;
 				if (!detail_endpoint_reported) {
 					// Printer::Print(StringUtil::Format(
 					//     "[onelake] table detail lookup failed for '%s': %s. Skipping further detail requests.",
@@ -359,16 +351,15 @@ unique_ptr<OneLakeTableInfo> OneLakeTableSet::GetTableInfo(ClientContext &contex
 		throw InternalException("Schema data not available for OneLake schema");
 	}
 
-	auto lakehouse_id = schema.schema_data->id;
-
 	// Get detailed table info from OneLake API
 	auto &credentials = onelake_catalog.GetCredentials();
 	OneLakeTableInfo table_info_api;
-	if (detail_endpoint_supported) {
+	if ((delta_detail_supported || iceberg_detail_supported) && schema.schema_data) {
 		try {
-			table_info_api = OneLakeAPI::GetTableInfo(context, onelake_catalog.GetWorkspaceId(), lakehouse_id,
-			                                          table_name, credentials);
+			table_info_api = OneLakeAPI::GetTableInfo(context, onelake_catalog.GetWorkspaceId(), *schema.schema_data,
+			                                      schema.name, table_name, string(), credentials);
 		} catch (const Exception &ex) {
+			(void)ex;
 			if (!detail_endpoint_reported) {
 				// Printer::Print(StringUtil::Format(
 				//     "[onelake] table detail lookup failed for '%s': %s.", table_name, ex.what()));

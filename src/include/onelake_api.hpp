@@ -28,12 +28,14 @@ public:
 	                                                const string &lakehouse_id, const string &lakehouse_name,
 	                                                const string &schema_name, OneLakeCredentials &credentials);
 
-	static OneLakeTableInfo GetTableInfo(ClientContext &context, const string &workspace_id, const string &lakehouse_id,
-	                                     const string &table_name, OneLakeCredentials &credentials);
+	static OneLakeTableInfo GetTableInfo(ClientContext &context, const string &workspace_id,
+	                                     const OneLakeLakehouse &lakehouse, const string &schema_name,
+	                                     const string &table_name, const string &format_hint,
+	                                     OneLakeCredentials &credentials);
 	static vector<string> ListDirectory(ClientContext &context, const string &abfss_path,
 	                                    OneLakeCredentials &credentials);
 
-	static string GetAccessToken(ClientContext *context, OneLakeCredentials &credentials,
+	static string GetAccessToken(OneLakeCredentials &credentials,
 	                             OneLakeTokenAudience audience = OneLakeTokenAudience::Fabric);
 
 private:
