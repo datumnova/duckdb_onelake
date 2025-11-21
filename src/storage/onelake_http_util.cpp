@@ -12,6 +12,7 @@
 #include "duckdb/main/secret/secret_manager.hpp"
 #include <unordered_set>
 #include <cstdlib>
+#include <functional>
 
 namespace duckdb {
 
@@ -110,6 +111,22 @@ void EnsureHttpBearerSecret(ClientContext &context, OneLakeCatalog &catalog, con
 			return;
 		}
 		auto token_value = OneLakeAPI::GetAccessToken(credentials, OneLakeTokenAudience::OneLakeDfs);
+
+		size_t current_hash = 0;
+		for (const auto &s : scope_list) {
+			// 0x9e3779b9 is the fractional part of the golden ratio, used in Boost's hash_combine
+			// See: https://www.boost.org/doc/libs/1_55_0/doc/html/hash/reference.html#boost.hash_combine
+			current_hash ^= std::hash<string> {}(s) + 0x9e3779b9 + (current_hash << 6) + (current_hash >> 2);
+		}
+		// 0x9e3779b9 is the fractional part of the golden ratio, used in Boost's hash_combine
+		// See: https://www.boost.org/doc/libs/1_55_0/doc/html/hash/reference.html#boost.hash_combine
+		current_hash ^= std::hash<string> {}(token_value) + 0x9e3779b9 + (current_hash << 6) + (current_hash >> 2);
+
+		if (current_hash == catalog.GetLastSecretHash()) {
+			ONELAKE_LOG_DEBUG(&context, "[delta] Skipping secret registration (unchanged)");
+			return;
+		}
+
 		ONELAKE_LOG_DEBUG(&context, "[delta] Registering dfs HTTP bearer secret with %llu scope entries",
 		                  static_cast<long long>(scope_list.size()));
 		auto secret = make_uniq<KeyValueSecret>(scope_list, "http", "config", workspace_id);
@@ -120,6 +137,8 @@ void EnsureHttpBearerSecret(ClientContext &context, OneLakeCatalog &catalog, con
 		unique_ptr<const BaseSecret> entry(base_ptr);
 		secret_manager.RegisterSecret(transaction, std::move(entry), OnCreateConflict::REPLACE_ON_CONFLICT,
 		                              SecretPersistType::TEMPORARY, SecretManager::TEMPORARY_STORAGE_NAME);
+
+		catalog.SetLastSecretHash(current_hash);
 	};
 
 	register_secret(dfs_scopes);

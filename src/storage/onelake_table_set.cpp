@@ -226,34 +226,6 @@ void OneLakeTableSet::LoadEntries(ClientContext &context) {
 		table_entry->table_data = make_uniq<OneLakeTable>(table);
 		bool is_iceberg_table = StringUtil::CIEquals(table_entry->table_data->format, "iceberg");
 
-		OneLakeTableInfo table_info;
-		bool &detail_flag = is_iceberg_table ? iceberg_detail_supported : delta_detail_supported;
-		if (detail_flag && schema.schema_data) {
-			try {
-				table_info = OneLakeAPI::GetTableInfo(context, onelake_catalog.GetWorkspaceId(), *schema.schema_data,
-				                                  schema.name, table.name, table_entry->table_data->format,
-				                                  credentials);
-			} catch (const Exception &ex) {
-				(void)ex;
-				detail_flag = false;
-				if (!detail_endpoint_reported) {
-					// Printer::Print(StringUtil::Format(
-					//     "[onelake] table detail lookup failed for '%s': %s. Skipping further detail requests.",
-					//     table.name, ex.what()));
-					detail_endpoint_reported = true;
-				}
-			}
-		}
-
-		if (table_info.has_metadata) {
-			if (!table_info.location.empty()) {
-				table_entry->table_data->location = table_info.location;
-			}
-			if (!table_info.format.empty()) {
-				table_entry->table_data->format = table_info.format;
-			}
-			table_entry->SetPartitionColumns(table_info.partition_columns);
-		}
 		if (table_entry->table_data->location.empty()) {
 			if (schema.schema_data && schema.schema_data->schema_enabled) {
 				table_entry->table_data->location = "Schemas/" + schema.name + "/Tables/" + table.name;
@@ -275,7 +247,10 @@ void OneLakeTableSet::LoadEntries(ClientContext &context) {
 		//                                   resolved_format, resolved_location));
 	}
 
-	auto storage_count = DiscoverTablesFromStorage(context, onelake_catalog, schema, *this, seen_names);
+	idx_t storage_count = 0;
+	if (api_count == 0) {
+		storage_count = DiscoverTablesFromStorage(context, onelake_catalog, schema, *this, seen_names);
+	}
 
 	// if (api_count == 0 && storage_count == 0) {
 	// 	Printer::Print(StringUtil::Format(
@@ -357,7 +332,7 @@ unique_ptr<OneLakeTableInfo> OneLakeTableSet::GetTableInfo(ClientContext &contex
 	if ((delta_detail_supported || iceberg_detail_supported) && schema.schema_data) {
 		try {
 			table_info_api = OneLakeAPI::GetTableInfo(context, onelake_catalog.GetWorkspaceId(), *schema.schema_data,
-			                                      schema.name, table_name, string(), credentials);
+			                                          schema.name, table_name, string(), credentials);
 		} catch (const Exception &ex) {
 			(void)ex;
 			if (!detail_endpoint_reported) {

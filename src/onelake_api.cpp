@@ -270,7 +270,7 @@ static string PerformBearerGet(const string &url, const string &token, long time
 }
 
 static string ResolveIcebergCatalogPrefix(const string &workspace_id, const OneLakeLakehouse &lakehouse,
-	                                       OneLakeCredentials &credentials) {
+                                          OneLakeCredentials &credentials) {
 	string warehouse = BuildWarehouseScope(workspace_id, lakehouse);
 	if (warehouse.empty()) {
 		return string();
@@ -312,8 +312,8 @@ static string ResolveIcebergCatalogPrefix(const string &workspace_id, const OneL
 }
 
 static bool TryFetchDeltaTableInfo(const string &workspace_id, const OneLakeLakehouse &lakehouse,
-	                                const string &schema_name, const string &table_name,
-	                                OneLakeCredentials &credentials, OneLakeTableInfo &out) {
+                                   const string &schema_name, const string &table_name, OneLakeCredentials &credentials,
+                                   OneLakeTableInfo &out) {
 	if (workspace_id.empty() || lakehouse.id.empty() || table_name.empty()) {
 		return false;
 	}
@@ -362,8 +362,8 @@ static bool TryFetchDeltaTableInfo(const string &workspace_id, const OneLakeLake
 }
 
 static bool TryFetchIcebergTableInfo(const string &workspace_id, const OneLakeLakehouse &lakehouse,
-	                                  const string &schema_name, const string &table_name,
-	                                  OneLakeCredentials &credentials, OneLakeTableInfo &out) {
+                                     const string &schema_name, const string &table_name,
+                                     OneLakeCredentials &credentials, OneLakeTableInfo &out) {
 	if (workspace_id.empty() || table_name.empty()) {
 		return false;
 	}
@@ -457,7 +457,8 @@ static vector<vector<string>> IcebergListNamespaces(const string &prefix, const 
 	return namespaces;
 }
 
-static string IcebergGetNamespaceLocation(const string &prefix, const vector<string> &namespace_parts, const string &token) {
+static string IcebergGetNamespaceLocation(const string &prefix, const vector<string> &namespace_parts,
+                                          const string &token) {
 	vector<string> suffix = {"namespaces"};
 	suffix.insert(suffix.end(), namespace_parts.begin(), namespace_parts.end());
 	string path = BuildIcebergPath(prefix, suffix);
@@ -477,7 +478,8 @@ static string IcebergGetNamespaceLocation(const string &prefix, const vector<str
 	return string();
 }
 
-static vector<string> IcebergListTables(const string &prefix, const vector<string> &namespace_parts, const string &token) {
+static vector<string> IcebergListTables(const string &prefix, const vector<string> &namespace_parts,
+                                        const string &token) {
 	vector<string> tables;
 	string next_token;
 	do {
@@ -512,7 +514,7 @@ static vector<string> IcebergListTables(const string &prefix, const vector<strin
 }
 
 static vector<OneLakeTable> FetchIcebergTables(const string &workspace_id, const OneLakeLakehouse &lakehouse,
-	                                            OneLakeCredentials &credentials) {
+                                               OneLakeCredentials &credentials) {
 	vector<OneLakeTable> tables;
 	string warehouse = BuildWarehouseScope(workspace_id, lakehouse);
 	if (warehouse.empty()) {
@@ -1187,9 +1189,9 @@ vector<OneLakeTable> OneLakeAPI::GetTablesFromSchema(ClientContext &context, con
 }
 
 OneLakeTableInfo OneLakeAPI::GetTableInfo(ClientContext &context, const string &workspace_id,
-	                                      const OneLakeLakehouse &lakehouse, const string &schema_name,
-	                                      const string &table_name, const string &format_hint,
-	                                      OneLakeCredentials &credentials) {
+                                          const OneLakeLakehouse &lakehouse, const string &schema_name,
+                                          const string &table_name, const string &format_hint,
+                                          OneLakeCredentials &credentials) {
 	(void)context;
 
 	OneLakeTableInfo table_info;

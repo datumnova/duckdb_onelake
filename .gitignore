@@ -16,3 +16,7 @@ local-test
 .github/copilot-instructions.md
 rust/
 scripts/delta-write-test.py
+
+#CodeQL
+duckdb_onelake/
+_codeql_detected_source_root
