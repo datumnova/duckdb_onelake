@@ -14,3 +14,5 @@ __pycache__/
 vcpkg_installed/
 local-test
 .github/copilot-instructions.md
+rust/
+scripts/delta-write-test.py
