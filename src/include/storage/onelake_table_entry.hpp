@@ -26,6 +26,9 @@ public:
 	const vector<string> &GetPartitionColumns() const {
 		return partition_columns;
 	}
+	void SetCreateMetadata(unique_ptr<OneLakeCreateTableMetadata> metadata);
+	OneLakeCreateTableMetadata *GetCreateMetadata();
+	const OneLakeCreateTableMetadata *GetCreateMetadata() const;
 
 	string GetCachedResolvedPath() const;
 	void RememberResolvedPath(const string &path);
@@ -37,6 +40,7 @@ private:
 	mutable std::mutex bind_lock;
 	vector<string> partition_columns;
 	string resolved_path;
+	unique_ptr<OneLakeCreateTableMetadata> create_metadata;
 };
 
 } // namespace duckdb

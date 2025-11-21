@@ -1,7 +1,8 @@
 #pragma once
+#include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
+#include "duckdb/common/insertion_order_preserving_map.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
-#include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 
 namespace duckdb {
 
@@ -58,6 +59,15 @@ struct OneLakeTableInfo {
 	vector<string> partition_columns;
 	bool has_metadata = false;
 	unique_ptr<CreateTableInfo> create_info;
+};
+
+struct OneLakeCreateTableMetadata {
+	OneLakeCreateTableMetadata() = default;
+
+	unique_ptr<CreateTableInfo> create_info;
+	vector<string> partition_columns;
+	InsertionOrderPreservingMap<string> table_properties;
+	bool is_ctas = false;
 };
 
 } // namespace duckdb

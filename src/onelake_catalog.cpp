@@ -7,6 +7,7 @@
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
+#include "duckdb/planner/operator/logical_create_table.hpp"
 #include "duckdb/planner/operator/logical_insert.hpp"
 #include "duckdb/storage/database_size.hpp"
 
@@ -86,7 +87,16 @@ void OneLakeCatalog::ClearCache() {
 
 PhysicalOperator &OneLakeCatalog::PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
                                                     LogicalCreateTable &op, PhysicalOperator &plan) {
-	throw NotImplementedException("OneLake catalog does not support CREATE TABLE AS");
+	if (op.children.empty()) {
+		throw InternalException("PlanCreateTableAs invoked without a projection plan");
+	}
+	auto &schema_entry = op.schema.Cast<OneLakeSchemaEntry>();
+	auto entry = GetEntry(context, CatalogType::TABLE_ENTRY, schema_entry.name, op.info->Base().table,
+	                     OnEntryNotFound::THROW_EXCEPTION);
+	auto &table_entry = entry->Cast<OneLakeTableEntry>();
+	auto &insert = planner.Make<PhysicalOneLakeInsert>(table_entry, *this, op.types, op.estimated_cardinality);
+	insert.children.push_back(plan);
+	return insert;
 }
 
 PhysicalOperator &OneLakeCatalog::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,

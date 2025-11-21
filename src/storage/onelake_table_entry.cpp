@@ -147,6 +147,21 @@ void OneLakeTableEntry::SetPartitionColumns(vector<string> columns) {
 	partition_columns = std::move(columns);
 }
 
+void OneLakeTableEntry::SetCreateMetadata(unique_ptr<OneLakeCreateTableMetadata> metadata) {
+	std::lock_guard<std::mutex> guard(bind_lock);
+	create_metadata = std::move(metadata);
+}
+
+OneLakeCreateTableMetadata *OneLakeTableEntry::GetCreateMetadata() {
+	std::lock_guard<std::mutex> guard(bind_lock);
+	return create_metadata.get();
+}
+
+const OneLakeCreateTableMetadata *OneLakeTableEntry::GetCreateMetadata() const {
+	std::lock_guard<std::mutex> guard(bind_lock);
+	return create_metadata.get();
+}
+
 string OneLakeTableEntry::GetCachedResolvedPath() const {
 	std::lock_guard<std::mutex> guard(bind_lock);
 	return resolved_path;

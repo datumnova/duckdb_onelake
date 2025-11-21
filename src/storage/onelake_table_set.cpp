@@ -6,9 +6,12 @@
 #include "duckdb/catalog/dependency_list.hpp"
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/helper.hpp"
+#include "duckdb/common/insertion_order_preserving_map.hpp"
 #include "duckdb/common/printer.hpp"
-#include "duckdb/common/vector.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/vector.hpp"
+#include <algorithm>
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/parser/constraints/list.hpp"
@@ -37,6 +40,7 @@ using duckdb::idx_t;
 using duckdb::Logger;
 using duckdb::LogLevel;
 using duckdb::make_uniq;
+using duckdb::InsertionOrderPreservingMap;
 using duckdb::OneLakeAPI;
 using duckdb::OneLakeCatalog;
 using duckdb::OneLakeSchemaEntry;
@@ -46,8 +50,60 @@ using duckdb::Printer;
 using duckdb::string;
 using duckdb::StringUtil;
 using duckdb::unique_ptr;
+using duckdb::unique_ptr_cast;
 using duckdb::vector;
 using std::unordered_set;
+
+string GetTagValue(const InsertionOrderPreservingMap<string> &tags, const string &key) {
+	auto entry = tags.find(key);
+	if (entry == tags.end()) {
+		return string();
+	}
+	return entry->second;
+}
+
+vector<string> ParseListValue(const string &value) {
+	vector<string> result;
+	auto entries = StringUtil::Split(value, ',');
+	for (auto &entry : entries) {
+		auto trimmed = entry;
+		StringUtil::Trim(trimmed);
+		if (trimmed.empty()) {
+			continue;
+		}
+		if (std::find(result.begin(), result.end(), trimmed) != result.end()) {
+			continue;
+		}
+		result.push_back(trimmed);
+	}
+	return result;
+}
+
+vector<string> ExtractPartitionColumns(const CreateTableInfo &create_info) {
+	vector<string> partitions;
+	static const vector<string> candidate_keys = {"partition_columns", "partition_by", "onelake_partition_columns"};
+	for (const auto &key : candidate_keys) {
+		auto raw = GetTagValue(create_info.tags, key);
+		if (raw.empty()) {
+			continue;
+		}
+		auto parsed = ParseListValue(raw);
+		partitions.insert(partitions.end(), parsed.begin(), parsed.end());
+	}
+	return partitions;
+}
+
+string ExtractExplicitLocation(const CreateTableInfo &create_info) {
+	static const vector<string> location_keys = {"location", "path", "onelake_location"};
+	for (const auto &key : location_keys) {
+		auto value = GetTagValue(create_info.tags, key);
+		StringUtil::Trim(value);
+		if (!value.empty()) {
+			return value;
+		}
+	}
+	return string();
+}
 
 bool HydrateColumnDefinitions(ClientContext &context, OneLakeTableEntry &table_entry) {
 	if (table_entry.GetColumns().PhysicalColumnCount() > 0) {
@@ -405,7 +461,46 @@ unique_ptr<OneLakeTableInfo> OneLakeTableSet::GetTableInfo(ClientContext &contex
 }
 
 optional_ptr<CatalogEntry> OneLakeTableSet::CreateTable(ClientContext &context, BoundCreateTableInfo &info) {
-	throw NotImplementedException("OneLake table creation not supported - tables are managed through Fabric");
+	auto &base_info = info.Base();
+	if (base_info.temporary) {
+		throw BinderException("TEMPORARY tables are not supported in OneLake catalogs");
+	}
+	EnsureFresh(context);
+	auto existing_entry = GetEntry(context, base_info.table);
+	if (existing_entry) {
+		switch (base_info.on_conflict) {
+		case OnCreateConflict::IGNORE_ON_CONFLICT:
+			return existing_entry;
+		case OnCreateConflict::REPLACE_ON_CONFLICT:
+			throw NotImplementedException("CREATE OR REPLACE TABLE is not supported in OneLake catalogs yet");
+		default:
+			throw BinderException("Table with name \"%s\" already exists in OneLake schema \"%s\"", base_info.table,
+			                    schema.name);
+		}
+	}
+	auto table_entry = make_uniq<OneLakeTableEntry>(catalog, schema, base_info);
+	auto partition_columns = ExtractPartitionColumns(base_info);
+	if (!partition_columns.empty()) {
+		table_entry->SetPartitionColumns(partition_columns);
+	}
+	if (table_entry->table_data) {
+		table_entry->table_data->type = "Table";
+		if (table_entry->table_data->format.empty()) {
+			table_entry->table_data->format = "Delta";
+		}
+		auto custom_location = ExtractExplicitLocation(base_info);
+		if (!custom_location.empty()) {
+			table_entry->table_data->location = custom_location;
+		}
+	}
+	auto metadata = make_uniq<OneLakeCreateTableMetadata>();
+	metadata->create_info = unique_ptr_cast<CreateInfo, CreateTableInfo>(base_info.Copy());
+	metadata->partition_columns = partition_columns;
+	metadata->table_properties = metadata->create_info->tags;
+	metadata->is_ctas = info.query.get() != nullptr;
+	table_entry->SetCreateMetadata(std::move(metadata));
+	auto result = CreateEntry(std::move(table_entry));
+	return result;
 }
 
 void OneLakeTableSet::AlterTable(ClientContext &context, RenameTableInfo &info) {
