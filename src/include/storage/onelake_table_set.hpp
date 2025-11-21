@@ -33,7 +33,8 @@ protected:
 	void AlterTable(ClientContext &context, RemoveColumnInfo &info);
 
 private:
-	bool detail_endpoint_supported = true;
+	bool delta_detail_supported = true;
+	bool iceberg_detail_supported = true;
 	bool detail_endpoint_reported = false;
 	transaction_t last_refresh_query_id = MAXIMUM_QUERY_ID;
 	bool refresh_forced = true;

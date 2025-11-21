@@ -1,20 +1,20 @@
 #include "onelake_api.hpp"
-#include "onelake_logging.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/interval.hpp"
-#include "onelake_secret.hpp"
 #include <azure/core/context.hpp>
 #include <azure/core/credentials/credentials.hpp>
 #include <azure/identity/default_azure_credential.hpp>
 #include <curl/curl.h>
 #include <json/json.h>
 #include <unordered_set>
+#include <unordered_map>
 #include <memory>
 #include <chrono>
-#include <cstdlib>
+#include <iostream>
+#include <mutex>
 
 namespace duckdb {
 
@@ -25,20 +25,6 @@ static size_t WriteCallback(void *contents, size_t size, size_t nmemb, string *u
 }
 
 namespace {
-
-string UrlEncode(const string &value) {
-	CURL *curl = curl_easy_init();
-	string result = value;
-	if (curl) {
-		char *escaped = curl_easy_escape(curl, value.c_str(), static_cast<int>(value.size()));
-		if (escaped) {
-			result = string(escaped);
-			curl_free(escaped);
-		}
-		curl_easy_cleanup(curl);
-	}
-	return result;
-}
 
 struct AbfssPathComponents {
 	string container;
@@ -114,140 +100,90 @@ string ComposeLeaf(const string &base_path, const string &full_name) {
 	return full_name;
 }
 
-string ReadEnvTokenValue(ClientContext *context, const string &variable_name) {
-	if (variable_name.empty()) {
-		ONELAKE_LOG_DEBUG(context, "[credentials] Skipping environment lookup because variable name is empty");
-		return string();
-	}
-	auto token = ResolveTokenFromContextOrEnv(context, variable_name);
-	if (token.empty()) {
-		ONELAKE_LOG_DEBUG(context, "[credentials] Environment variable '%s' is not defined", variable_name.c_str());
-		return string();
-	}
-	ONELAKE_LOG_DEBUG(context, "[credentials] Retrieved token from '%s' (length=%llu)", variable_name.c_str(),
-	                  static_cast<long long>(token.size()));
-	return token;
-}
-
-string AcquireTokenViaAzureCli(ClientContext *context, const string &scope, OneLakeCredentials &credentials) {
-	try {
-		ONELAKE_LOG_INFO(context, "[credentials] Attempting Azure CLI token acquisition for scope '%s'", scope.c_str());
-		auto credential = std::make_shared<Azure::Identity::DefaultAzureCredential>();
-		Azure::Core::Credentials::TokenRequestContext request_context;
-		request_context.Scopes = {scope};
-		Azure::Core::Context azure_context;
-		auto access_token_result = credential->GetToken(request_context, azure_context);
-		auto access_token = access_token_result.Token;
-		auto expires_on = access_token_result.ExpiresOn.time_since_epoch();
-		auto expires_microseconds = std::chrono::duration_cast<std::chrono::microseconds>(expires_on).count();
-		auto expiry = Timestamp::FromEpochMicroSeconds(expires_microseconds);
-
-		OneLakeCredentials::TokenCacheEntry entry;
-		entry.token = access_token;
-		entry.expiry = expiry;
-		credentials.token_cache[scope] = entry;
-		auto now = Timestamp::GetCurrentTimestamp();
-		auto expiry_micros = Timestamp::GetEpochMicroSeconds(entry.expiry);
-		auto now_micros = Timestamp::GetEpochMicroSeconds(now);
-		auto delta_micros = expiry_micros - now_micros;
-		ONELAKE_LOG_INFO(context, "[credentials] Azure CLI token acquired (scope='%s', expires_in=%lld sec)",
-		                 scope.c_str(), static_cast<long long>(delta_micros / Interval::MICROS_PER_SEC));
-
-		return access_token;
-	} catch (const std::exception &ex) {
-		ONELAKE_LOG_ERROR(context, "[credentials] Azure CLI token acquisition failed: %s", ex.what());
-		throw IOException("Failed to obtain OneLake access token via Azure CLI credentials: %s", ex.what());
-	}
-}
-
-const char *AudienceLabel(OneLakeTokenAudience audience) {
-	switch (audience) {
-	case OneLakeTokenAudience::Fabric:
-		return "fabric";
-	case OneLakeTokenAudience::OneLakeDfs:
-		return "dfs";
-	default:
-		return "fabric";
-	}
-}
-
-string AcquireTokenViaCredentialChain(ClientContext *context, OneLakeTokenAudience audience, const string &scope,
-                                      OneLakeCredentials &credentials) {
-	auto chain_steps = ParseOneLakeCredentialChain(credentials.credential_chain);
-	if (chain_steps.empty()) {
-		chain_steps.emplace_back("cli");
-	}
-	string last_error = "No credential providers succeeded";
-	ONELAKE_LOG_INFO(context, "[credentials] Executing chain '%s' for %s scope '%s'",
-	                 credentials.credential_chain.c_str(), AudienceLabel(audience), scope.c_str());
-	for (auto &step : chain_steps) {
-		ONELAKE_LOG_DEBUG(context, "[credentials] Trying chain step '%s'", step.c_str());
-		if (step == "env") {
-			vector<string> env_candidates;
-			auto add_candidate = [&](const string &configured_value, const char *fallback) {
-				string candidate = configured_value.empty() ? string(fallback ? fallback : "") : configured_value;
-				if (candidate.empty()) {
-					return;
-				}
-				if (std::find(env_candidates.begin(), env_candidates.end(), candidate) != env_candidates.end()) {
-					return;
-				}
-				env_candidates.push_back(candidate);
-			};
-			switch (audience) {
-			case OneLakeTokenAudience::Fabric:
-				add_candidate(credentials.env_fabric_variable, ONELAKE_DEFAULT_ENV_FABRIC_TOKEN_VARIABLE);
-				add_candidate(credentials.env_storage_variable, ONELAKE_DEFAULT_ENV_STORAGE_TOKEN_VARIABLE);
-				break;
-			case OneLakeTokenAudience::OneLakeDfs:
-				add_candidate(credentials.env_storage_variable, ONELAKE_DEFAULT_ENV_STORAGE_TOKEN_VARIABLE);
-				add_candidate(credentials.env_fabric_variable, ONELAKE_DEFAULT_ENV_FABRIC_TOKEN_VARIABLE);
-				break;
-			default:
-				break;
-			}
-			if (env_candidates.empty()) {
-				last_error = "No environment variables configured for credential chain";
-				continue;
-			}
-			ONELAKE_LOG_DEBUG(context, "[credentials] Env candidates for %s scope: %s", AudienceLabel(audience),
-			                  StringUtil::Join(env_candidates, ", ").c_str());
-			for (auto &variable : env_candidates) {
-				auto env_token = ReadEnvTokenValue(context, variable);
-				if (!env_token.empty()) {
-					ONELAKE_LOG_INFO(context, "[credentials] Using token from '%s' for %s scope", variable.c_str(),
-					                 AudienceLabel(audience));
-					return env_token;
-				}
-			}
-			last_error = StringUtil::Format("Environment variables %s are not set or empty",
-			                                StringUtil::Join(env_candidates, ", "));
-			continue;
-		}
-		if (step == "cli") {
-			try {
-				return AcquireTokenViaAzureCli(context, scope, credentials);
-			} catch (const std::exception &ex) {
-				last_error = ex.what();
-				ONELAKE_LOG_WARN(context, "[credentials] Azure CLI step failed: %s", ex.what());
-				continue;
-			}
-		}
-		last_error = StringUtil::Format("Unsupported credential chain step '%s'", step);
-		ONELAKE_LOG_WARN(context, "[credentials] %s", last_error.c_str());
-	}
-	throw IOException("Failed to obtain OneLake access token via Azure credential chain: %s", last_error.c_str());
-}
-
 } // namespace
 
-namespace {
-const char *FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default";
-const char *DFS_SCOPE = "https://storage.azure.com/.default";
-const char *FABRIC_API_BASE = "https://api.fabric.microsoft.com/v1";
-const char *MICROSOFT_ENTRA_TOKEN_ENDPOINT = "https://login.microsoftonline.com";
+static const char *DELTA_TABLE_API_BASE = "https://onelake.table.fabric.microsoft.com/delta";
+static const char *ICEBERG_TABLE_API_BASE = "https://onelake.table.fabric.microsoft.com/iceberg";
+static const char *FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default";
+static const char *DFS_SCOPE = "https://storage.azure.com/.default";
 
-const string &ScopeForAudience(OneLakeTokenAudience audience) {
+static string BuildWarehouseScope(const string &workspace_id, const OneLakeLakehouse &lakehouse) {
+	if (workspace_id.empty()) {
+		return string();
+	}
+	string data_item = lakehouse.id;
+	if (data_item.empty()) {
+		data_item = lakehouse.name;
+		if (!data_item.empty() && !StringUtil::EndsWith(data_item, ".Lakehouse")) {
+			data_item += ".Lakehouse";
+		}
+	}
+	if (data_item.empty()) {
+		return string();
+	}
+	return workspace_id + "/" + data_item;
+}
+
+static string UrlEncodeComponent(const string &value) {
+	CURL *curl = curl_easy_init();
+	if (!curl) {
+		throw InternalException("Failed to initialize CURL for URL encoding");
+	}
+	char *escaped = curl_easy_escape(curl, value.c_str(), static_cast<int>(value.size()));
+	string result;
+	if (escaped) {
+		result = string(escaped);
+		curl_free(escaped);
+	}
+	curl_easy_cleanup(curl);
+	return result;
+}
+
+static vector<string> SplitPathSegments(const string &path) {
+	if (path.empty()) {
+		return {};
+	}
+	return StringUtil::Split(path, '/');
+}
+
+static string EncodePathSegments(const vector<string> &segments) {
+	string encoded;
+	for (idx_t i = 0; i < segments.size(); i++) {
+		if (i > 0) {
+			encoded += "/";
+		}
+		encoded += UrlEncodeComponent(segments[i]);
+	}
+	return encoded;
+}
+
+static string BuildIcebergPath(const string &prefix, const vector<string> &suffix_segments) {
+	vector<string> segments;
+	segments.push_back("v1");
+	auto prefix_parts = SplitPathSegments(prefix);
+	segments.insert(segments.end(), prefix_parts.begin(), prefix_parts.end());
+	segments.insert(segments.end(), suffix_segments.begin(), suffix_segments.end());
+	return EncodePathSegments(segments);
+}
+
+static string JoinNamespaceName(const vector<string> &namespace_parts) {
+	if (namespace_parts.empty()) {
+		return string();
+	}
+	return StringUtil::Join(namespace_parts, namespace_parts.size(), ".", [](const string &entry) { return entry; });
+}
+
+static string EnsureTrailingSlash(const string &input) {
+	if (input.empty()) {
+		return string();
+	}
+	if (StringUtil::EndsWith(input, "/")) {
+		return input;
+	}
+	return input + "/";
+}
+
+static const string &ScopeForAudience(OneLakeTokenAudience audience) {
 	static const string fabric_scope = FABRIC_SCOPE;
 	static const string dfs_scope = DFS_SCOPE;
 	switch (audience) {
@@ -260,45 +196,429 @@ const string &ScopeForAudience(OneLakeTokenAudience audience) {
 	}
 }
 
-} // namespace
+static string NormalizeCatalogName(const string &lakehouse_name) {
+	if (lakehouse_name.empty()) {
+		return string();
+	}
+	if (StringUtil::EndsWith(lakehouse_name, ".Lakehouse")) {
+		return lakehouse_name;
+	}
+	return lakehouse_name + ".Lakehouse";
+}
 
-string OneLakeAPI::GetAccessToken(ClientContext *context, OneLakeCredentials &credentials,
-                                  OneLakeTokenAudience audience) {
+static string ConvertHttpsLocationToAbfss(const string &storage_location) {
+	const string https_prefix = "https://onelake.dfs.fabric.microsoft.com/";
+	if (!StringUtil::StartsWith(storage_location, https_prefix)) {
+		return storage_location;
+	}
+	string path_part = storage_location.substr(https_prefix.size());
+	auto slash_pos = path_part.find('/');
+	if (slash_pos == string::npos) {
+		return storage_location;
+	}
+	string workspace_part = path_part.substr(0, slash_pos);
+	string remaining_path = path_part.substr(slash_pos + 1);
+	return "abfss://" + workspace_part + "@onelake.dfs.fabric.microsoft.com/" + remaining_path;
+}
+
+static string BuildUnityCatalogBase(const string &workspace_id, const string &lakehouse_id) {
+	if (workspace_id.empty() || lakehouse_id.empty()) {
+		return string();
+	}
+	return string(DELTA_TABLE_API_BASE) + "/" + workspace_id + "/" + lakehouse_id + "/api/2.1/unity-catalog";
+}
+
+static string FormatUnityCatalogIdentifier(const string &schema_name, const string &table_name) {
+	if (schema_name.empty()) {
+		return table_name;
+	}
+	return schema_name + "." + table_name;
+}
+
+static string PerformBearerGet(const string &url, const string &token, long timeout_seconds = 60L) {
+	CURL *curl = curl_easy_init();
+	if (!curl) {
+		throw InternalException("Failed to initialize CURL for OneLake HTTP request");
+	}
+	string response_string;
+	curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_string);
+	curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);
+
+	struct curl_slist *headers = nullptr;
+	string auth_header = "Authorization: Bearer " + token;
+	headers = curl_slist_append(headers, auth_header.c_str());
+	headers = curl_slist_append(headers, "Accept: application/json");
+	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+	CURLcode res = curl_easy_perform(curl);
+	long response_code = 0;
+	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+
+	curl_slist_free_all(headers);
+	curl_easy_cleanup(curl);
+
+	if (res != CURLE_OK) {
+		throw IOException("OneLake HTTP request failed: %s", curl_easy_strerror(res));
+	}
+	if (response_code < 200 || response_code >= 300) {
+		throw IOException("OneLake HTTP request returned HTTP %ld - %s", response_code, response_string.c_str());
+	}
+
+	return response_string;
+}
+
+static string ResolveIcebergCatalogPrefix(const string &workspace_id, const OneLakeLakehouse &lakehouse,
+                                          OneLakeCredentials &credentials) {
+	string warehouse = BuildWarehouseScope(workspace_id, lakehouse);
+	if (warehouse.empty()) {
+		return string();
+	}
+	static std::mutex prefix_lock;
+	static std::unordered_map<string, string> prefix_cache;
+	{
+		std::lock_guard<std::mutex> guard(prefix_lock);
+		auto it = prefix_cache.find(warehouse);
+		if (it != prefix_cache.end()) {
+			return it->second;
+		}
+	}
+
+	string prefix = warehouse;
+	try {
+		string token = OneLakeAPI::GetAccessToken(credentials, OneLakeTokenAudience::OneLakeDfs);
+		string config_url = string(ICEBERG_TABLE_API_BASE) + "/v1/config?warehouse=" + UrlEncodeComponent(warehouse);
+		string config_response = PerformBearerGet(config_url, token);
+		Json::Value config_json;
+		Json::Reader reader;
+		if (reader.parse(config_response, config_json)) {
+			if (config_json.isMember("overrides") && config_json["overrides"].isObject()) {
+				const auto &overrides = config_json["overrides"];
+				if (overrides.isMember("prefix") && overrides["prefix"].isString()) {
+					prefix = overrides["prefix"].asString();
+				}
+			}
+		}
+	} catch (const Exception &) {
+		// Ignore prefix discovery failures and fall back to the warehouse identifier
+	}
+
+	{
+		std::lock_guard<std::mutex> guard(prefix_lock);
+		prefix_cache[warehouse] = prefix;
+	}
+	return prefix;
+}
+
+static bool TryFetchDeltaTableInfo(const string &workspace_id, const OneLakeLakehouse &lakehouse,
+                                   const string &schema_name, const string &table_name, OneLakeCredentials &credentials,
+                                   OneLakeTableInfo &out) {
+	if (workspace_id.empty() || lakehouse.id.empty() || table_name.empty()) {
+		return false;
+	}
+	auto base = BuildUnityCatalogBase(workspace_id, lakehouse.id);
+	if (base.empty()) {
+		return false;
+	}
+	string table_identifier = FormatUnityCatalogIdentifier(schema_name, table_name);
+	string url = base + "/tables/" + UrlEncodeComponent(table_identifier);
+	string catalog_name = NormalizeCatalogName(lakehouse.name);
+	if (!catalog_name.empty()) {
+		url += "?catalog_name=" + UrlEncodeComponent(catalog_name);
+	}
+	string token = OneLakeAPI::GetAccessToken(credentials, OneLakeTokenAudience::OneLakeDfs);
+	string response = PerformBearerGet(url, token);
+	Json::Value root;
+	Json::Reader reader;
+	if (!reader.parse(response, root)) {
+		throw InvalidInputException("Failed to parse Unity Catalog table response");
+	}
+	out.has_metadata = true;
+	if (root.isMember("name") && root["name"].isString()) {
+		out.name = root["name"].asString();
+	}
+	if (root.isMember("data_source_format") && root["data_source_format"].isString()) {
+		out.format = root["data_source_format"].asString();
+	} else if (root.isMember("table_format") && root["table_format"].isString()) {
+		out.format = root["table_format"].asString();
+	} else {
+		out.format = "Delta";
+	}
+	if (root.isMember("storage_location") && root["storage_location"].isString()) {
+		out.location = ConvertHttpsLocationToAbfss(root["storage_location"].asString());
+	} else if (root.isMember("location") && root["location"].isString()) {
+		out.location = ConvertHttpsLocationToAbfss(root["location"].asString());
+	}
+	out.partition_columns.clear();
+	if (root.isMember("partition_columns") && root["partition_columns"].isArray()) {
+		for (const auto &col : root["partition_columns"]) {
+			if (col.isString()) {
+				out.partition_columns.push_back(col.asString());
+			}
+		}
+	}
+	return true;
+}
+
+static bool TryFetchIcebergTableInfo(const string &workspace_id, const OneLakeLakehouse &lakehouse,
+                                     const string &schema_name, const string &table_name,
+                                     OneLakeCredentials &credentials, OneLakeTableInfo &out) {
+	if (workspace_id.empty() || table_name.empty()) {
+		return false;
+	}
+	string prefix = ResolveIcebergCatalogPrefix(workspace_id, lakehouse, credentials);
+	if (prefix.empty()) {
+		return false;
+	}
+	vector<string> namespace_parts;
+	if (!schema_name.empty()) {
+		namespace_parts = StringUtil::Split(schema_name, '.');
+	}
+	vector<string> suffix = {"namespaces"};
+	suffix.insert(suffix.end(), namespace_parts.begin(), namespace_parts.end());
+	suffix.push_back("tables");
+	suffix.push_back(table_name);
+	string path = BuildIcebergPath(prefix, suffix);
+	string url = string(ICEBERG_TABLE_API_BASE) + "/" + path;
+	string token = OneLakeAPI::GetAccessToken(credentials, OneLakeTokenAudience::OneLakeDfs);
+	string response = PerformBearerGet(url, token);
+	Json::Value root;
+	Json::Reader reader;
+	if (!reader.parse(response, root)) {
+		throw InvalidInputException("Failed to parse Iceberg table response");
+	}
+	out.has_metadata = true;
+	out.format = "Iceberg";
+	out.name = table_name;
+	if (root.isMember("metadata-location") && root["metadata-location"].isString()) {
+		out.location = root["metadata-location"].asString();
+	}
+	if (root.isMember("metadata") && root["metadata"].isObject()) {
+		const auto &metadata = root["metadata"];
+		if (metadata.isMember("location") && metadata["location"].isString()) {
+			out.location = metadata["location"].asString();
+		}
+		if (metadata.isMember("partition-spec") && metadata["partition-spec"].isArray()) {
+			out.partition_columns.clear();
+			for (const auto &field : metadata["partition-spec"]) {
+				if (!field.isObject()) {
+					continue;
+				}
+				if (field.isMember("fieldName") && field["fieldName"].isString()) {
+					out.partition_columns.push_back(field["fieldName"].asString());
+				}
+			}
+		}
+	}
+	if (!out.location.empty()) {
+		out.location = ConvertHttpsLocationToAbfss(out.location);
+	}
+	return true;
+}
+
+static vector<vector<string>> IcebergListNamespaces(const string &prefix, const string &token) {
+	vector<vector<string>> namespaces;
+	string next_token;
+	do {
+		vector<string> suffix = {"namespaces"};
+		string path = BuildIcebergPath(prefix, suffix);
+		string url = string(ICEBERG_TABLE_API_BASE) + "/" + path;
+		if (!next_token.empty()) {
+			url += "?page-token=" + UrlEncodeComponent(next_token);
+		}
+		string response = PerformBearerGet(url, token);
+		Json::Value root;
+		Json::Reader reader;
+		if (!reader.parse(response, root)) {
+			throw InvalidInputException("Failed to parse Iceberg namespaces response");
+		}
+		if (root.isMember("namespaces") && root["namespaces"].isArray()) {
+			for (const auto &ns_value : root["namespaces"]) {
+				if (!ns_value.isArray()) {
+					continue;
+				}
+				vector<string> ns_parts;
+				for (const auto &part : ns_value) {
+					if (part.isString()) {
+						ns_parts.push_back(part.asString());
+					}
+				}
+				if (!ns_parts.empty()) {
+					namespaces.push_back(std::move(ns_parts));
+				}
+			}
+		}
+		next_token.clear();
+		if (root.isMember("next-page-token") && root["next-page-token"].isString()) {
+			next_token = root["next-page-token"].asString();
+		}
+	} while (!next_token.empty());
+	return namespaces;
+}
+
+static string IcebergGetNamespaceLocation(const string &prefix, const vector<string> &namespace_parts,
+                                          const string &token) {
+	vector<string> suffix = {"namespaces"};
+	suffix.insert(suffix.end(), namespace_parts.begin(), namespace_parts.end());
+	string path = BuildIcebergPath(prefix, suffix);
+	string url = string(ICEBERG_TABLE_API_BASE) + "/" + path;
+	string response = PerformBearerGet(url, token);
+	Json::Value root;
+	Json::Reader reader;
+	if (!reader.parse(response, root)) {
+		throw InvalidInputException("Failed to parse Iceberg namespace response");
+	}
+	if (root.isMember("properties") && root["properties"].isObject()) {
+		const auto &props = root["properties"];
+		if (props.isMember("location") && props["location"].isString()) {
+			return props["location"].asString();
+		}
+	}
+	return string();
+}
+
+static vector<string> IcebergListTables(const string &prefix, const vector<string> &namespace_parts,
+                                        const string &token) {
+	vector<string> tables;
+	string next_token;
+	do {
+		vector<string> suffix = {"namespaces"};
+		suffix.insert(suffix.end(), namespace_parts.begin(), namespace_parts.end());
+		suffix.push_back("tables");
+		string path = BuildIcebergPath(prefix, suffix);
+		string url = string(ICEBERG_TABLE_API_BASE) + "/" + path;
+		if (!next_token.empty()) {
+			url += "?page-token=" + UrlEncodeComponent(next_token);
+		}
+		string response = PerformBearerGet(url, token);
+		Json::Value root;
+		Json::Reader reader;
+		if (!reader.parse(response, root)) {
+			throw InvalidInputException("Failed to parse Iceberg tables response");
+		}
+		if (root.isMember("identifiers") && root["identifiers"].isArray()) {
+			for (const auto &identifier : root["identifiers"]) {
+				if (!identifier.isObject() || !identifier.isMember("name")) {
+					continue;
+				}
+				tables.push_back(identifier["name"].asString());
+			}
+		}
+		next_token.clear();
+		if (root.isMember("next-page-token") && root["next-page-token"].isString()) {
+			next_token = root["next-page-token"].asString();
+		}
+	} while (!next_token.empty());
+	return tables;
+}
+
+static vector<OneLakeTable> FetchIcebergTables(const string &workspace_id, const OneLakeLakehouse &lakehouse,
+                                               OneLakeCredentials &credentials) {
+	vector<OneLakeTable> tables;
+	string warehouse = BuildWarehouseScope(workspace_id, lakehouse);
+	if (warehouse.empty()) {
+		return tables;
+	}
+	string token = OneLakeAPI::GetAccessToken(credentials, OneLakeTokenAudience::OneLakeDfs);
+	string config_url = string(ICEBERG_TABLE_API_BASE) + "/v1/config?warehouse=" + UrlEncodeComponent(warehouse);
+	string prefix = warehouse;
+	try {
+		string config_response = PerformBearerGet(config_url, token);
+		Json::Value config_json;
+		Json::Reader reader;
+		if (reader.parse(config_response, config_json)) {
+			if (config_json.isMember("overrides") && config_json["overrides"].isObject()) {
+				const auto &overrides = config_json["overrides"];
+				if (overrides.isMember("prefix") && overrides["prefix"].isString()) {
+					prefix = overrides["prefix"].asString();
+				}
+			}
+		}
+	} catch (const Exception &) {
+		// Ignore prefix fetch failures and fall back to warehouse identifier
+	}
+	auto namespaces = IcebergListNamespaces(prefix, token);
+	for (auto &ns_parts : namespaces) {
+		string display_name = JoinNamespaceName(ns_parts);
+		string namespace_location;
+		try {
+			namespace_location = IcebergGetNamespaceLocation(prefix, ns_parts, token);
+		} catch (const Exception &) {
+			// Continue even if schema location is unavailable
+		}
+		auto table_names = IcebergListTables(prefix, ns_parts, token);
+		for (auto &table_name : table_names) {
+			OneLakeTable table;
+			table.name = table_name;
+			table.type = "Table";
+			table.schema_name = display_name;
+			table.format = "Iceberg";
+			if (!namespace_location.empty()) {
+				string base = EnsureTrailingSlash(namespace_location);
+				table.location = base + table_name;
+			}
+			tables.push_back(std::move(table));
+		}
+	}
+	return tables;
+}
+
+string OneLakeAPI::GetAccessToken(OneLakeCredentials &credentials, OneLakeTokenAudience audience) {
 	const auto &scope = ScopeForAudience(audience);
 	auto current_time = Timestamp::GetCurrentTimestamp();
 	auto cache_entry = credentials.token_cache.find(scope);
 	if (cache_entry != credentials.token_cache.end()) {
 		if (!cache_entry->second.token.empty() && current_time < cache_entry->second.expiry) {
-			ONELAKE_LOG_DEBUG(context, "[credentials] Cache hit for %s scope '%s'", AudienceLabel(audience),
-			                  scope.c_str());
 			return cache_entry->second.token;
 		}
 	}
 
 	if (credentials.provider == OneLakeCredentialProvider::CredentialChain) {
-		return AcquireTokenViaCredentialChain(context, audience, scope, credentials);
+		try {
+			auto credential = std::make_shared<Azure::Identity::DefaultAzureCredential>();
+			Azure::Core::Credentials::TokenRequestContext request_context;
+			request_context.Scopes = {scope};
+			Azure::Core::Context azure_context;
+			auto access_token_result = credential->GetToken(request_context, azure_context);
+			auto access_token = access_token_result.Token;
+			auto expires_on = access_token_result.ExpiresOn.time_since_epoch();
+			auto expires_microseconds = std::chrono::duration_cast<std::chrono::microseconds>(expires_on).count();
+			auto expiry = Timestamp::FromEpochMicroSeconds(expires_microseconds);
+
+			OneLakeCredentials::TokenCacheEntry entry;
+			entry.token = access_token;
+			entry.expiry = expiry;
+			credentials.token_cache[scope] = entry;
+
+			return access_token;
+		} catch (const std::exception &ex) {
+			throw IOException("Failed to obtain OneLake access token via Azure credential chain: %s", ex.what());
+		}
 	}
 
 	if (credentials.provider != OneLakeCredentialProvider::ServicePrincipal) {
 		throw IOException("Unsupported OneLake credential provider encountered when requesting token");
 	}
-	ONELAKE_LOG_INFO(context, "[credentials] Requesting service principal token for %s scope '%s'",
-	                 AudienceLabel(audience), scope.c_str());
 
-	CURL *curl = curl_easy_init();
+	CURL *curl;
+	CURLcode res;
+	string response_string;
+	string post_data;
+
+	curl = curl_easy_init();
 	if (!curl) {
 		throw InternalException("Failed to initialize CURL for OneLake API");
 	}
 
-	string token_url = string(MICROSOFT_ENTRA_TOKEN_ENDPOINT) + "/" + credentials.tenant_id + "/oauth2/v2.0/token";
-	string response_string;
-	string post_data;
+	// Microsoft Entra ID token endpoint
+	string token_url = "https://login.microsoftonline.com/" + credentials.tenant_id + "/oauth2/v2.0/token";
 
-	string encoded_client_id = UrlEncode(credentials.client_id);
-	string encoded_client_secret = UrlEncode(credentials.client_secret);
-	string encoded_scope = UrlEncode(scope);
-	post_data = "grant_type=client_credentials&client_id=" + encoded_client_id +
-	            "&client_secret=" + encoded_client_secret + "&scope=" + encoded_scope;
+	// Prepare POST data for client credentials flow
+	post_data = "grant_type=client_credentials";
+	post_data += "&client_id=" + credentials.client_id;
+	post_data += "&client_secret=" + credentials.client_secret;
+	post_data += "&scope=" + scope;
 
 	curl_easy_setopt(curl, CURLOPT_URL, token_url.c_str());
 	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_data.c_str());
@@ -310,7 +630,7 @@ string OneLakeAPI::GetAccessToken(ClientContext *context, OneLakeCredentials &cr
 	headers = curl_slist_append(headers, "Content-Type: application/x-www-form-urlencoded");
 	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
-	CURLcode res = curl_easy_perform(curl);
+	res = curl_easy_perform(curl);
 
 	long response_code;
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
@@ -318,10 +638,7 @@ string OneLakeAPI::GetAccessToken(ClientContext *context, OneLakeCredentials &cr
 	curl_slist_free_all(headers);
 	curl_easy_cleanup(curl);
 	if (res != CURLE_OK || response_code != 200) {
-		auto body = response_string.empty() ? string("<empty>") : response_string;
-		ONELAKE_LOG_ERROR(context, "[credentials] Service principal token request failed (HTTP %ld) body=%s",
-		                  response_code, body.c_str());
-		throw IOException("Failed to obtain OneLake access token: HTTP %ld - %s", response_code, body.c_str());
+		throw IOException("Failed to obtain OneLake access token: HTTP %ld", response_code);
 	}
 
 	// Parse JSON response to get access token
@@ -353,18 +670,17 @@ string OneLakeAPI::GetAccessToken(ClientContext *context, OneLakeCredentials &cr
 		entry.expiry = expiry;
 		credentials.token_cache[scope] = entry;
 
-		ONELAKE_LOG_INFO(context, "[credentials] Obtained service principal token for scope '%s' (expires_in=%lld sec)",
-		                 scope.c_str(), static_cast<long long>(expires_in_seconds));
 		return access_token;
 	} catch (const std::exception &e) {
-		ONELAKE_LOG_ERROR(context, "[credentials] Failed to parse token response: %s", e.what());
 		throw InvalidInputException("Failed to parse token response: %s", e.what());
 	}
 }
 
 string OneLakeAPI::MakeAPIRequest(ClientContext &context, const string &url, OneLakeCredentials &credentials,
                                   bool allow_not_found) {
-	string access_token = GetAccessToken(&context, credentials, OneLakeTokenAudience::Fabric);
+	(void)context;
+
+	string access_token = GetAccessToken(credentials, OneLakeTokenAudience::Fabric);
 
 	CURL *curl;
 	CURLcode res;
@@ -375,7 +691,6 @@ string OneLakeAPI::MakeAPIRequest(ClientContext &context, const string &url, One
 		throw InternalException("Failed to initialize CURL for OneLake API");
 	}
 
-	ONELAKE_LOG_DEBUG(&context, "[api] GET %s (allow_not_found=%s)", url.c_str(), allow_not_found ? "true" : "false");
 	curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
 	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_string);
@@ -391,12 +706,10 @@ string OneLakeAPI::MakeAPIRequest(ClientContext &context, const string &url, One
 
 	long response_code;
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
-	ONELAKE_LOG_DEBUG(&context, "[api] Response HTTP %ld (%zu bytes)", response_code, response_string.size());
 
 	curl_slist_free_all(headers);
 	curl_easy_cleanup(curl);
 	if (res != CURLE_OK) {
-		ONELAKE_LOG_ERROR(&context, "[api] Request failed: %s", curl_easy_strerror(res));
 		throw IOException("OneLake API request failed: %s", curl_easy_strerror(res));
 	}
 
@@ -404,7 +717,6 @@ string OneLakeAPI::MakeAPIRequest(ClientContext &context, const string &url, One
 		return string();
 	}
 	if (response_code < 200 || response_code >= 300) {
-		ONELAKE_LOG_WARN(&context, "[api] Non-success status %ld body=%s", response_code, response_string.c_str());
 		throw IOException("OneLake API returned error: HTTP %ld - %s", response_code, response_string.c_str());
 	}
 
@@ -412,23 +724,18 @@ string OneLakeAPI::MakeAPIRequest(ClientContext &context, const string &url, One
 }
 
 string OneLakeAPI::BuildAPIUrl(const string &workspace_id, const string &endpoint) {
-	return string(FABRIC_API_BASE) + "/workspaces/" + workspace_id + "/" + endpoint;
+	return "https://api.fabric.microsoft.com/v1/workspaces/" + workspace_id + "/" + endpoint;
 }
 
 vector<OneLakeWorkspace> OneLakeAPI::GetWorkspaces(ClientContext &context, OneLakeCredentials &credentials) {
 	vector<OneLakeWorkspace> workspaces;
 	std::unordered_set<string> visited_urls;
 	string next_url = "https://api.fabric.microsoft.com/v1/workspaces";
-	idx_t page_number = 0;
-	ONELAKE_LOG_INFO(&context, "[api] Listing OneLake workspaces");
 
 	while (!next_url.empty()) {
 		if (!visited_urls.insert(next_url).second) {
 			break;
 		}
-		page_number++;
-		ONELAKE_LOG_DEBUG(&context, "[api] Fetching workspace page %llu: %s", static_cast<long long>(page_number),
-		                  next_url.c_str());
 
 		string response = MakeAPIRequest(context, next_url, credentials);
 
@@ -493,7 +800,17 @@ vector<OneLakeWorkspace> OneLakeAPI::GetWorkspaces(ClientContext &context, OneLa
 			if (root.isMember("continuationToken") && root["continuationToken"].isString()) {
 				auto token = root["continuationToken"].asString();
 				if (!token.empty()) {
-					next_url = string(FABRIC_API_BASE) + "/workspaces?continuationToken=" + UrlEncode(token);
+					CURL *curl = curl_easy_init();
+					string encoded_token = token;
+					if (curl) {
+						char *escaped = curl_easy_escape(curl, token.c_str(), static_cast<int>(token.size()));
+						if (escaped) {
+							encoded_token = string(escaped);
+							curl_free(escaped);
+						}
+						curl_easy_cleanup(curl);
+					}
+					next_url = "https://api.fabric.microsoft.com/v1/workspaces?continuationToken=" + encoded_token;
 					continue;
 				}
 			}
@@ -504,8 +821,6 @@ vector<OneLakeWorkspace> OneLakeAPI::GetWorkspaces(ClientContext &context, OneLa
 		}
 	}
 
-	ONELAKE_LOG_INFO(&context, "[api] Workspace enumeration complete: %llu items",
-	                 static_cast<long long>(workspaces.size()));
 	return workspaces;
 }
 
@@ -515,7 +830,6 @@ vector<OneLakeLakehouse> OneLakeAPI::GetLakehouses(ClientContext &context, const
 	string response = MakeAPIRequest(context, url, credentials);
 
 	vector<OneLakeLakehouse> lakehouses;
-	ONELAKE_LOG_INFO(&context, "[api] Listing lakehouses for workspace=%s", workspace_id.c_str());
 
 	try {
 		Json::Value root;
@@ -555,8 +869,6 @@ vector<OneLakeLakehouse> OneLakeAPI::GetLakehouses(ClientContext &context, const
 		throw InvalidInputException("Failed to parse lakehouses response: %s", e.what());
 	}
 
-	ONELAKE_LOG_INFO(&context, "[api] Found %llu lakehouses in workspace=%s", static_cast<long long>(lakehouses.size()),
-	                 workspace_id.c_str());
 	return lakehouses;
 }
 
@@ -567,9 +879,6 @@ vector<OneLakeTable> OneLakeAPI::GetTables(ClientContext &context, const string 
 
 	string next_url = BuildAPIUrl(workspace_id, "lakehouses/" + lakehouse_id + "/tables");
 	std::unordered_set<string> visited_urls;
-	idx_t page_number = 0;
-	ONELAKE_LOG_INFO(&context, "[api] Listing tables for workspace=%s lakehouse=%s", workspace_id.c_str(),
-	                 lakehouse_id.c_str());
 
 	while (!next_url.empty()) {
 		if (!visited_urls.insert(next_url).second) {
@@ -577,9 +886,6 @@ vector<OneLakeTable> OneLakeAPI::GetTables(ClientContext &context, const string 
 			break;
 		}
 
-		page_number++;
-		ONELAKE_LOG_DEBUG(&context, "[api] Fetching table page %llu: %s", static_cast<long long>(page_number),
-		                  next_url.c_str());
 		string response = MakeAPIRequest(context, next_url, credentials, true);
 		if (response.empty()) {
 			break;
@@ -643,8 +949,18 @@ vector<OneLakeTable> OneLakeAPI::GetTables(ClientContext &context, const string 
 			if (root.isMember("continuationToken") && root["continuationToken"].isString()) {
 				auto token = root["continuationToken"].asString();
 				if (!token.empty()) {
-					next_url = BuildAPIUrl(workspace_id, "lakehouses/" + lakehouse_id +
-					                                         "/tables?continuationToken=" + UrlEncode(token));
+					CURL *curl = curl_easy_init();
+					string encoded_token = token;
+					if (curl) {
+						char *escaped = curl_easy_escape(curl, token.c_str(), static_cast<int>(token.size()));
+						if (escaped) {
+							encoded_token = string(escaped);
+							curl_free(escaped);
+						}
+						curl_easy_cleanup(curl);
+					}
+					next_url = BuildAPIUrl(workspace_id,
+					                       "lakehouses/" + lakehouse_id + "/tables?continuationToken=" + encoded_token);
 					continue;
 				}
 			}
@@ -655,40 +971,56 @@ vector<OneLakeTable> OneLakeAPI::GetTables(ClientContext &context, const string 
 		}
 	}
 
-	ONELAKE_LOG_INFO(&context, "[api] Table enumeration complete: %llu tables", static_cast<long long>(tables.size()));
 	return tables;
 }
 
 vector<OneLakeTable> OneLakeAPI::GetTables(ClientContext &context, const string &workspace_id,
                                            const OneLakeLakehouse &lakehouse, OneLakeCredentials &credentials) {
-	if (!lakehouse.schema_enabled) {
-		// Use the original API for regular lakehouses
-		return GetTables(context, workspace_id, lakehouse.id, credentials);
+	vector<OneLakeTable> all_tables;
+	std::unordered_set<string> seen_names;
+	auto register_table = [&](OneLakeTable table) {
+		string key = StringUtil::Lower(table.name);
+		if (!table.schema_name.empty()) {
+			key = StringUtil::Lower(table.schema_name) + "." + key;
+		}
+		if (!seen_names.insert(key).second) {
+			return;
+		}
+		all_tables.push_back(std::move(table));
+	};
+
+	bool delta_api_success = false;
+	try {
+		auto schemas = GetSchemas(context, workspace_id, lakehouse.id, lakehouse.name, credentials);
+		for (const auto &schema : schemas) {
+			auto schema_tables =
+			    GetTablesFromSchema(context, workspace_id, lakehouse.id, lakehouse.name, schema.name, credentials);
+			for (auto &table : schema_tables) {
+				table.schema_name = schema.name;
+				register_table(std::move(table));
+			}
+		}
+		delta_api_success = true;
+	} catch (const Exception &) {
+		// Unity Catalog API not available; will fall back to legacy Fabric endpoint
 	}
 
-	// For schema-enabled lakehouses, use Unity Catalog API
-	vector<OneLakeTable> all_tables;
-	ONELAKE_LOG_INFO(&context, "[api] Listing schema-enabled tables for workspace=%s lakehouse=%s",
-	                 workspace_id.c_str(), lakehouse.name.c_str());
-
-	// First get all schemas
-	auto schemas = GetSchemas(context, workspace_id, lakehouse.id, lakehouse.name, credentials);
-
-	// Then get tables from each schema
-	for (const auto &schema : schemas) {
-		ONELAKE_LOG_DEBUG(&context, "[api] Fetching tables for schema=%s", schema.name.c_str());
-		auto schema_tables =
-		    GetTablesFromSchema(context, workspace_id, lakehouse.id, lakehouse.name, schema.name, credentials);
-
-		// For schema-enabled lakehouses, preserve original table names and store schema info
-		for (auto &table : schema_tables) {
-			table.schema_name = schema.name;
-			all_tables.push_back(std::move(table));
+	if (!delta_api_success) {
+		auto legacy_tables = GetTables(context, workspace_id, lakehouse.id, credentials);
+		for (auto &table : legacy_tables) {
+			register_table(std::move(table));
 		}
 	}
 
-	ONELAKE_LOG_INFO(&context, "[api] Schema-enabled table enumeration complete: %llu tables",
-	                 static_cast<long long>(all_tables.size()));
+	try {
+		auto iceberg_tables = FetchIcebergTables(workspace_id, lakehouse, credentials);
+		for (auto &table : iceberg_tables) {
+			register_table(std::move(table));
+		}
+	} catch (const Exception &) {
+		// Iceberg REST catalog may be disabled; ignore failures and rely on DFS fallback later
+	}
+
 	return all_tables;
 }
 
@@ -696,15 +1028,13 @@ vector<OneLakeSchema> OneLakeAPI::GetSchemas(ClientContext &context, const strin
                                              const string &lakehouse_id, const string &lakehouse_name,
                                              OneLakeCredentials &credentials) {
 	vector<OneLakeSchema> schemas;
-	ONELAKE_LOG_INFO(&context, "[api] Listing schemas for workspace=%s lakehouse=%s", workspace_id.c_str(),
-	                 lakehouse_name.c_str());
 
 	// Build Unity Catalog API URL for schemas
 	string url = "https://onelake.table.fabric.microsoft.com/delta/" + workspace_id + "/" + lakehouse_id +
 	             "/api/2.1/unity-catalog/schemas?catalog_name=" + lakehouse_name + ".Lakehouse";
 
 	// Use DFS scope for Unity Catalog API
-	string access_token = GetAccessToken(&context, credentials, OneLakeTokenAudience::OneLakeDfs);
+	string access_token = GetAccessToken(credentials, OneLakeTokenAudience::OneLakeDfs);
 
 	CURL *curl = curl_easy_init();
 	if (!curl) {
@@ -769,7 +1099,6 @@ vector<OneLakeSchema> OneLakeAPI::GetSchemas(ClientContext &context, const strin
 		throw InvalidInputException("Failed to parse schemas response: %s", e.what());
 	}
 
-	ONELAKE_LOG_INFO(&context, "[api] Schema enumeration complete: %llu items", static_cast<long long>(schemas.size()));
 	return schemas;
 }
 
@@ -777,8 +1106,6 @@ vector<OneLakeTable> OneLakeAPI::GetTablesFromSchema(ClientContext &context, con
                                                      const string &lakehouse_id, const string &lakehouse_name,
                                                      const string &schema_name, OneLakeCredentials &credentials) {
 	vector<OneLakeTable> tables;
-	ONELAKE_LOG_INFO(&context, "[api] Listing tables for schema=%s in lakehouse=%s", schema_name.c_str(),
-	                 lakehouse_name.c_str());
 
 	// Build Unity Catalog API URL for tables in schema
 	string url = "https://onelake.table.fabric.microsoft.com/delta/" + workspace_id + "/" + lakehouse_id +
@@ -786,7 +1113,7 @@ vector<OneLakeTable> OneLakeAPI::GetTablesFromSchema(ClientContext &context, con
 	             ".Lakehouse&schema_name=" + schema_name;
 
 	// Use DFS scope for Unity Catalog API
-	string access_token = GetAccessToken(&context, credentials, OneLakeTokenAudience::OneLakeDfs);
+	string access_token = GetAccessToken(credentials, OneLakeTokenAudience::OneLakeDfs);
 
 	CURL *curl = curl_easy_init();
 	if (!curl) {
@@ -848,29 +1175,7 @@ vector<OneLakeTable> OneLakeAPI::GetTablesFromSchema(ClientContext &context, con
 
 				if (table_json.isMember("storage_location")) {
 					string storage_location = table_json["storage_location"].asString();
-					if (StringUtil::StartsWith(storage_location, "https://")) {
-						// Convert from
-						// https://onelake.dfs.fabric.microsoft.com/<workspaceID>/<LakehouseID>/Tables/<schema>/<table_name>
-						// to
-						// abfss://<workspaceID>@onelake.dfs.fabric.microsoft.com/<LakehouseID>/Tables/<schema>/<table_name>
-						const string https_prefix = "https://onelake.dfs.fabric.microsoft.com/";
-						if (StringUtil::StartsWith(storage_location, https_prefix)) {
-							string path_part = storage_location.substr(https_prefix.size());
-							auto slash_pos = path_part.find('/');
-							if (slash_pos != string::npos) {
-								string workspace_part = path_part.substr(0, slash_pos);
-								string remaining_path = path_part.substr(slash_pos + 1);
-								table.location =
-								    "abfss://" + workspace_part + "@onelake.dfs.fabric.microsoft.com/" + remaining_path;
-							} else {
-								table.location = storage_location;
-							}
-						} else {
-							table.location = storage_location;
-						}
-					} else {
-						table.location = storage_location;
-					}
+					table.location = ConvertHttpsLocationToAbfss(storage_location);
 				}
 
 				tables.push_back(std::move(table));
@@ -880,76 +1185,54 @@ vector<OneLakeTable> OneLakeAPI::GetTablesFromSchema(ClientContext &context, con
 		throw InvalidInputException("Failed to parse schema tables response: %s", e.what());
 	}
 
-	ONELAKE_LOG_INFO(&context, "[api] Schema table enumeration complete: %llu tables",
-	                 static_cast<long long>(tables.size()));
 	return tables;
 }
 
 OneLakeTableInfo OneLakeAPI::GetTableInfo(ClientContext &context, const string &workspace_id,
-                                          const string &lakehouse_id, const string &table_name,
+                                          const OneLakeLakehouse &lakehouse, const string &schema_name,
+                                          const string &table_name, const string &format_hint,
                                           OneLakeCredentials &credentials) {
+	(void)context;
+
 	OneLakeTableInfo table_info;
 	table_info.name = table_name;
-	table_info.format = "Delta";
-
-	string url = BuildAPIUrl(workspace_id, "lakehouses/" + lakehouse_id + "/tables/" + table_name);
-	string response = MakeAPIRequest(context, url, credentials, true);
-	if (response.empty()) {
-		// Endpoint not available for this table; fall back to defaults
-		return table_info;
+	if (!format_hint.empty()) {
+		table_info.format = format_hint;
+	} else {
+		table_info.format = "Delta";
 	}
-
-	try {
-		Json::Value root;
-		Json::Reader reader;
-
-		if (!reader.parse(response, root)) {
-			throw InvalidInputException("Failed to parse JSON table info response");
-		}
-
-		if (root.isMember("error")) {
-			const auto &error_obj = root["error"];
-			if (error_obj.isObject() && error_obj.isMember("message")) {
-				throw InvalidInputException("OneLake API error while fetching table '%s': %s", table_name,
-				                            error_obj["message"].asString());
-			}
-			throw InvalidInputException("OneLake API error while fetching table '%s': %s", table_name,
-			                            error_obj.toStyledString());
-		}
-
-		table_info.has_metadata = true;
-		if (root.isMember("name") && root["name"].isString()) {
-			table_info.name = root["name"].asString();
-		}
-		if (root.isMember("format") && root["format"].isString()) {
-			table_info.format = root["format"].asString();
-		}
-		if (root.isMember("location") && root["location"].isString()) {
-			table_info.location = root["location"].asString();
-		}
-
-		// Get partition columns if available
-		if (root.isMember("partitionColumns") && root["partitionColumns"].isArray()) {
-			for (const auto &col : root["partitionColumns"]) {
-				table_info.partition_columns.push_back(col.asString());
-			}
-		}
-	} catch (const std::exception &e) {
-		throw InvalidInputException("Failed to parse table info response: %s", e.what());
+	bool prefer_iceberg = StringUtil::CIEquals(table_info.format, "iceberg");
+	bool success = false;
+	if (prefer_iceberg) {
+		success = TryFetchIcebergTableInfo(workspace_id, lakehouse, schema_name, table_name, credentials, table_info);
+	} else {
+		success = TryFetchDeltaTableInfo(workspace_id, lakehouse, schema_name, table_name, credentials, table_info);
 	}
-
+	if (!success && !prefer_iceberg) {
+		// If the caller did not specify a schema, attempting the Iceberg endpoint can still succeed for
+		// mixed Lakehouses.
+		success = TryFetchIcebergTableInfo(workspace_id, lakehouse, schema_name, table_name, credentials, table_info);
+	}
+	if (!success && prefer_iceberg) {
+		// Allow Delta fallback for Iceberg hints in environments where the Iceberg API is disabled.
+		success = TryFetchDeltaTableInfo(workspace_id, lakehouse, schema_name, table_name, credentials, table_info);
+	}
+	if (!success) {
+		table_info.has_metadata = false;
+		table_info.partition_columns.clear();
+	}
 	return table_info;
 }
 
 vector<string> OneLakeAPI::ListDirectory(ClientContext &context, const string &abfss_path,
                                          OneLakeCredentials &credentials) {
+	(void)context;
 	AbfssPathComponents components;
 	if (!ParseAbfssPath(abfss_path, components)) {
 		throw InvalidInputException("Invalid abfss path: %s", abfss_path);
 	}
-	ONELAKE_LOG_INFO(&context, "[dfs] Listing directory %s", abfss_path.c_str());
 
-	auto token = GetAccessToken(&context, credentials, OneLakeTokenAudience::OneLakeDfs);
+	auto token = GetAccessToken(credentials, OneLakeTokenAudience::OneLakeDfs);
 	CURL *curl = curl_easy_init();
 	if (!curl) {
 		throw InternalException("Failed to initialize CURL for OneLake directory listing");
@@ -987,7 +1270,6 @@ vector<string> OneLakeAPI::ListDirectory(ClientContext &context, const string &a
 	CURLcode res = curl_easy_perform(curl);
 	long response_code = 0;
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
-	ONELAKE_LOG_DEBUG(&context, "[dfs] HTTP %ld (%zu bytes)", response_code, response_string.size());
 
 	if (escaped_directory) {
 		curl_free(escaped_directory);
@@ -996,11 +1278,9 @@ vector<string> OneLakeAPI::ListDirectory(ClientContext &context, const string &a
 	curl_easy_cleanup(curl);
 
 	if (res != CURLE_OK) {
-		ONELAKE_LOG_ERROR(&context, "[dfs] List request failed: %s", curl_easy_strerror(res));
 		throw IOException("OneLake DFS list request failed: %s", curl_easy_strerror(res));
 	}
 	if (response_code < 200 || response_code >= 300) {
-		ONELAKE_LOG_WARN(&context, "[dfs] Non-success status %ld body=%s", response_code, response_string.c_str());
 		throw IOException("OneLake DFS list returned HTTP %ld - %s", response_code, response_string.c_str());
 	}
 
@@ -1037,8 +1317,6 @@ vector<string> OneLakeAPI::ListDirectory(ClientContext &context, const string &a
 		throw InvalidInputException("Failed to parse OneLake DFS list response: %s", ex.what());
 	}
 
-	ONELAKE_LOG_INFO(&context, "[dfs] Directory listing returned %llu items",
-	                 static_cast<long long>(directories.size()));
 	return directories;
 }
 

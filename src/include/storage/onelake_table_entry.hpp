@@ -29,11 +29,13 @@ public:
 
 private:
 	void UpdateColumnDefinitions(const vector<string> &names, const vector<LogicalType> &types);
+	void EnsureDetailsLoaded(ClientContext &context);
 
 private:
 	mutable std::mutex bind_lock;
 	vector<string> partition_columns;
 	string resolved_path;
+	bool details_loaded = false;
 };
 
 } // namespace duckdb

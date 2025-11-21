@@ -9,8 +9,18 @@ namespace duckdb {
 
 class OneLakeSchemaEntry;
 
+/// @brief Represents a OneLake workspace as a DuckDB Catalog.
+///
+/// This class maps a Microsoft Fabric Workspace to a DuckDB Catalog (Database).
+/// It manages schemas (which map to Lakehouses) and handles authentication and connection details.
 class OneLakeCatalog : public Catalog {
 public:
+	/// @brief Constructs a new OneLakeCatalog.
+	/// @param db_p The attached database instance.
+	/// @param workspace_id The ID of the OneLake workspace.
+	/// @param catalog_name The name of the catalog in DuckDB.
+	/// @param credentials The credentials for accessing OneLake.
+	/// @param default_schema The default schema (lakehouse) to use.
 	explicit OneLakeCatalog(AttachedDatabase &db_p, const string &workspace_id, const string &catalog_name,
 	                        OneLakeCredentials credentials, string default_schema = string());
 	~OneLakeCatalog() override;
@@ -50,9 +60,13 @@ public:
 	void ClearCache();
 
 	// Getters for OneLake-specific properties
+
+	/// @brief Gets the OneLake Workspace ID.
 	const string &GetWorkspaceId() const {
 		return workspace_id;
 	}
+
+	/// @brief Gets the credentials used by this catalog.
 	OneLakeCredentials &GetCredentials() {
 		return credentials;
 	}
@@ -69,11 +83,22 @@ public:
 	void SetDefaultSchema(const string &schema_name);
 	string GetDefaultSchema() const override;
 
+	/// @brief Sets the hash of the last registered secret to optimize updates.
+	void SetLastSecretHash(size_t hash) {
+		last_secret_hash = hash;
+	}
+
+	/// @brief Gets the hash of the last registered secret.
+	size_t GetLastSecretHash() const {
+		return last_secret_hash;
+	}
+
 private:
 	OneLakeSchemaSet schemas;
 	string default_schema;
 	string configured_default_preference;
 	bool user_configured_default;
+	size_t last_secret_hash = 0;
 };
 
 } // namespace duckdb
