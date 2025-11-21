@@ -459,7 +459,6 @@ TableFunction OneLakeTableEntry::GetScanFunction(ClientContext &context, unique_
 		} catch (const Exception &ex) {
 			ONELAKE_LOG_WARN(&context, "[onelake] Cached path '%s' failed: %s. Falling back to discovery.",
 			                 resolved_path.c_str(), ex.what());
-			// Fall through to full discovery
 		}
 	}
 
@@ -468,7 +467,6 @@ TableFunction OneLakeTableEntry::GetScanFunction(ClientContext &context, unique_
 	if (IsIcebergFormat(table_format)) {
 		auto iceberg_function = ResolveIcebergFunction(context);
 
-		// Fixed: Corrected lambda to check for ABFS scheme without accessing class members
 		auto is_abfs = [](const string &candidate) {
 			return StringUtil::StartsWith(candidate, "abfss://");
 		};
