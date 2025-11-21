@@ -14,7 +14,8 @@
   ],
   "vcpkg-configuration": {
     "overlay-ports": [
-      "./extension-ci-tools/vcpkg_ports"
+      "./extension-ci-tools/vcpkg_ports",
+      "./vcpkg_overlays"
     ],
     "overlay-triplets": [
       "./extension-ci-tools/toolchains"

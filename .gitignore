@@ -31,3 +31,4 @@ local-test
 .github/copilot-instructions.md
 scripts/delta-write-test.py
 docs/create_update_plan.md
+docs/delta_write_support_plan.md
