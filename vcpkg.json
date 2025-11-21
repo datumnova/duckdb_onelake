@@ -8,6 +8,7 @@
     "azure-identity-cpp",
     {
       "name": "azure-core-cpp",
+      "default-features": false,
       "features": ["curl"]
     }
   ],
