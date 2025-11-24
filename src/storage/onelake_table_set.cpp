@@ -200,7 +200,10 @@ idx_t DiscoverTablesFromStorage(ClientContext &context, OneLakeCatalog &catalog,
 		vector<string> entries;
 		try {
 			entries = OneLakeAPI::ListDirectory(context, root, catalog.GetCredentials());
+			// Printer::Print(StringUtil::Format("[onelake] scanned directory '%s' via DFS API (entries=%llu)", root,
+			//                                   static_cast<uint64_t>(entries.size())));
 		} catch (const Exception &ex) {
+			// Printer::Print(StringUtil::Format("[onelake] failed to list '%s': %s", root, ex.what()));
 			continue;
 		}
 		for (auto &leaf : entries) {
@@ -223,6 +226,7 @@ idx_t DiscoverTablesFromStorage(ClientContext &context, OneLakeCatalog &catalog,
 				auto delta_entries = OneLakeAPI::ListDirectory(context, delta_dir, catalog.GetCredentials());
 				has_delta_log = !delta_entries.empty();
 			} catch (const Exception &) {
+				// Printer::Print(StringUtil::Format("[onelake] failed to inspect '%s/%s'", root, leaf));
 				has_delta_log = false;
 			}
 			bool has_iceberg_metadata = false;
@@ -260,6 +264,8 @@ idx_t DiscoverTablesFromStorage(ClientContext &context, OneLakeCatalog &catalog,
 			}
 			AddDiscoveredTable(context, catalog, schema, table_set, leaf, detected_format, relative_location);
 			discovered++;
+			// Printer::Print(
+			//     StringUtil::Format("[onelake] registered storage table '%s' from '%s/%s'", leaf, root, leaf));
 		}
 	}
 
@@ -281,14 +287,15 @@ void OneLakeTableSet::LoadEntries(ClientContext &context) {
 		throw InternalException("Schema data not available for OneLake schema");
 	}
 
-	auto lakehouse_id = schema.schema_data->id;
-	auto lakehouse_name = schema.schema_data->name;
+	// Printer::Print(StringUtil::Format("[onelake] loading tables for lakehouse '%s'", schema.schema_data->name));
 
+	// Get tables from the OneLake API
 	auto &credentials = onelake_catalog.GetCredentials();
 	auto tables = OneLakeAPI::GetTables(context, onelake_catalog.GetWorkspaceId(), *schema.schema_data, credentials);
 	std::unordered_set<string> seen_names;
 	idx_t api_count = 0;
-	detail_endpoint_supported = true;
+	delta_detail_supported = true;
+	iceberg_detail_supported = true;
 	detail_endpoint_reported = false;
 
 	for (auto &table : tables) {
@@ -302,50 +309,46 @@ void OneLakeTableSet::LoadEntries(ClientContext &context) {
 		info.table = table.name;
 		auto table_entry = make_uniq<OneLakeTableEntry>(catalog, schema, info);
 		table_entry->table_data = make_uniq<OneLakeTable>(table);
+		bool is_iceberg_table = StringUtil::CIEquals(table_entry->table_data->format, "iceberg");
 
-		OneLakeTableInfo table_info;
-		if (detail_endpoint_supported) {
-			try {
-				table_info = OneLakeAPI::GetTableInfo(context, onelake_catalog.GetWorkspaceId(), lakehouse_id,
-				                                      table.name, credentials);
-				if (!table_info.has_metadata) {
-					detail_endpoint_supported = false;
-					if (!detail_endpoint_reported) {
-						detail_endpoint_reported = true;
-					}
-				}
-			} catch (const Exception &ex) {
-				detail_endpoint_supported = false;
-				if (!detail_endpoint_reported) {
-					detail_endpoint_reported = true;
-				}
-			}
-		}
-
-		if (table_info.has_metadata) {
-			if (!table_info.location.empty()) {
-				table_entry->table_data->location = table_info.location;
-			}
-			if (!table_info.format.empty()) {
-				table_entry->table_data->format = table_info.format;
-			}
-			table_entry->SetPartitionColumns(table_info.partition_columns);
-		}
 		if (table_entry->table_data->location.empty()) {
 			if (schema.schema_data && schema.schema_data->schema_enabled) {
 				table_entry->table_data->location = "Schemas/" + schema.name + "/Tables/" + table.name;
+			} else if (is_iceberg_table && !table_entry->table_data->schema_name.empty()) {
+				table_entry->table_data->location = "Tables/" + table_entry->table_data->schema_name + "/" + table.name;
 			} else {
 				table_entry->table_data->location = "Tables/" + table.name;
 			}
 		}
 
+		const auto resolved_location = table_entry->table_data->location;
+		const auto resolved_format =
+		    table_entry->table_data->format.empty() ? "<unknown>" : table_entry->table_data->format;
+
 		HydrateColumnDefinitions(context, *table_entry);
 		CreateEntry(std::move(table_entry));
 		seen_names.insert(StringUtil::Lower(table.name));
 		api_count++;
+		// Printer::Print(StringUtil::Format("[onelake] API table '%s' (format=%s, location=%s)", table.name,
+		//                                   resolved_format, resolved_location));
 	}
 
-	auto storage_count = DiscoverTablesFromStorage(context, onelake_catalog, schema, *this, seen_names);
+	idx_t storage_count = 0;
+	if (api_count == 0) {
+		storage_count = DiscoverTablesFromStorage(context, onelake_catalog, schema, *this, seen_names);
+	}
+
+	// if (api_count == 0 && storage_count == 0) {
+	// 	Printer::Print(StringUtil::Format(
+	// 	    "[onelake] no tables discovered for lakehouse '%s'. Verify the Fabric API permissions and that tables "
+	// 	    "exist under the 'Tables/' directory.",
+	// 	    lakehouse_name));
+	// } else {
+	// 	// Printer::Print(
+	// 	//     StringUtil::Format("[onelake] registered %llu tables for lakehouse '%s' (api=%llu, storage=%llu)",
+	// 	//                        static_cast<uint64_t>(api_count + storage_count), lakehouse_name,
+	// 	//                        static_cast<uint64_t>(api_count), static_cast<uint64_t>(storage_count)));
+	// }
 }
 
 optional_ptr<CatalogEntry> OneLakeTableSet::RefreshTable(ClientContext &context, const string &table_name) {
@@ -409,24 +412,18 @@ unique_ptr<OneLakeTableInfo> OneLakeTableSet::GetTableInfo(ClientContext &contex
 		throw InternalException("Schema data not available for OneLake schema");
 	}
 
-	auto lakehouse_id = schema.schema_data->id;
-
 	// Get detailed table info from OneLake API
 	auto &credentials = onelake_catalog.GetCredentials();
 	OneLakeTableInfo table_info_api;
-	if (detail_endpoint_supported) {
+	if ((delta_detail_supported || iceberg_detail_supported) && schema.schema_data) {
 		try {
-			table_info_api = OneLakeAPI::GetTableInfo(context, onelake_catalog.GetWorkspaceId(), lakehouse_id,
-			                                          table_name, credentials);
-			if (!table_info_api.has_metadata) {
-				detail_endpoint_supported = false;
-				if (!detail_endpoint_reported) {
-					detail_endpoint_reported = true;
-				}
-			}
+			table_info_api = OneLakeAPI::GetTableInfo(context, onelake_catalog.GetWorkspaceId(), *schema.schema_data,
+			                                          schema.name, table_name, string(), credentials);
 		} catch (const Exception &ex) {
-			detail_endpoint_supported = false;
+			(void)ex;
 			if (!detail_endpoint_reported) {
+				// Printer::Print(StringUtil::Format(
+				//     "[onelake] table detail lookup failed for '%s': %s.", table_name, ex.what()));
 				detail_endpoint_reported = true;
 			}
 		}

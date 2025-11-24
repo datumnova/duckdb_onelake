@@ -129,6 +129,7 @@ OneLakeTableEntry::OneLakeTableEntry(Catalog &catalog, SchemaCatalogEntry &schem
 	this->internal = false;
 	table_data = make_uniq<OneLakeTable>();
 	table_data->name = info.table;
+	this->details_loaded = false;
 }
 
 OneLakeTableEntry::OneLakeTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, OneLakeTableInfo &info)
@@ -140,6 +141,7 @@ OneLakeTableEntry::OneLakeTableEntry(Catalog &catalog, SchemaCatalogEntry &schem
 	table_data->location = info.location;
 	table_data->type = "Table";
 	SetPartitionColumns(info.partition_columns);
+	this->details_loaded = true;
 }
 
 void OneLakeTableEntry::SetPartitionColumns(vector<string> columns) {
@@ -181,6 +183,60 @@ void OneLakeTableEntry::UpdateColumnDefinitions(const vector<string> &names, con
 	columns = std::move(new_columns);
 }
 
+void OneLakeTableEntry::EnsureDetailsLoaded(ClientContext &context) {
+	if (details_loaded) {
+		return;
+	}
+	if (!table_data) {
+		return;
+	}
+
+	// bool missing_location = table_data->location.empty();
+	// bool missing_partitions = partition_columns.empty();
+
+	auto &catalog = ParentCatalog().Cast<OneLakeCatalog>();
+	auto &schema_entry = ParentSchema().Cast<OneLakeSchemaEntry>();
+
+	if (!schema_entry.schema_data) {
+		return;
+	}
+
+	try {
+		auto table_info =
+		    OneLakeAPI::GetTableInfo(context, catalog.GetWorkspaceId(), *schema_entry.schema_data, schema_entry.name,
+		                             name, table_data->format, catalog.GetCredentials());
+
+		if (table_info.has_metadata) {
+			if (!table_info.location.empty()) {
+				table_data->location = table_info.location;
+			}
+			if (!table_info.format.empty()) {
+				table_data->format = table_info.format;
+			}
+			SetPartitionColumns(table_info.partition_columns);
+		}
+	} catch (const Exception &ex) {
+		// Log warning but continue - might be able to discover via DFS or guess location
+		ONELAKE_LOG_WARN(&context, "[onelake] Lazy detail fetch failed for '%s': %s", name.c_str(), ex.what());
+	}
+
+	// Fallback location logic if still empty
+	try {
+		if (table_data->location.empty()) {
+			if (schema_entry.schema_data && schema_entry.schema_data->schema_enabled) {
+				table_data->location = "Schemas/" + schema_entry.name + "/Tables/" + name;
+			} else if (StringUtil::CIEquals(table_data->format, "iceberg") && !table_data->schema_name.empty()) {
+				table_data->location = "Tables/" + table_data->schema_name + "/" + name;
+			}
+		}
+	} catch (const Exception &ex) {
+		ONELAKE_LOG_WARN(&context, "[onelake] Failed to retrieve table metadata from OneLake API for '%s': %s",
+		                 name.c_str(), ex.what());
+	}
+
+	details_loaded = true;
+}
+
 unique_ptr<BaseStatistics> OneLakeTableEntry::GetStatistics(ClientContext &, column_t) {
 	// OneLake doesn't provide column statistics through standard APIs
 	return nullptr;
@@ -193,6 +249,7 @@ void OneLakeTableEntry::BindUpdateConstraints(Binder &, LogicalGet &, LogicalPro
 
 TableFunction OneLakeTableEntry::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
 	std::lock_guard<std::mutex> guard(bind_lock);
+	EnsureDetailsLoaded(context);
 	auto &catalog = ParentCatalog().Cast<OneLakeCatalog>();
 	auto &schema_entry = ParentSchema().Cast<OneLakeSchemaEntry>();
 	if (!table_data) {
@@ -211,12 +268,40 @@ TableFunction OneLakeTableEntry::GetScanFunction(ClientContext &context, unique_
 		throw InvalidInputException("OneLake table '%s' uses unsupported format '%s'", name, table_format);
 	}
 
+	// Optimization: Try the cached resolved path first to avoid rebuilding candidate lists
+	if (!resolved_path.empty()) {
+		try {
+			if (IsIcebergFormat(table_format)) {
+				auto iceberg_function = ResolveIcebergFunction(context);
+				vector<LogicalType> return_types;
+				vector<string> return_names;
+				auto iceberg_bind =
+				    BindIcebergFunction(context, iceberg_function, resolved_path, return_types, return_names);
+				UpdateColumnDefinitions(return_names, return_types);
+				bind_data = std::move(iceberg_bind);
+				return iceberg_function;
+			} else {
+				auto delta_function = ResolveDeltaFunction(context);
+				vector<LogicalType> return_types;
+				vector<string> return_names;
+				auto delta_bind = BindDeltaFunction(context, delta_function, resolved_path, return_types, return_names);
+				UpdateColumnDefinitions(return_names, return_types);
+				bind_data = std::move(delta_bind);
+				return delta_function;
+			}
+		} catch (const Exception &ex) {
+			ONELAKE_LOG_WARN(&context, "[onelake] Cached path '%s' failed: %s. Falling back to discovery.",
+			                 resolved_path.c_str(), ex.what());
+		}
+	}
+
 	auto candidate_paths = BuildLocationCandidates(catalog, schema_entry, *this, resolved_path);
 
 	if (IsIcebergFormat(table_format)) {
 		auto iceberg_function = ResolveIcebergFunction(context);
+
 		auto is_abfs = [](const string &candidate) {
-			return StringUtil::StartsWith(candidate, "abfs://") || StringUtil::StartsWith(candidate, "abfss://");
+			return StringUtil::StartsWith(candidate, "abfss://");
 		};
 		std::stable_partition(candidate_paths.begin(), candidate_paths.end(), is_abfs);
 

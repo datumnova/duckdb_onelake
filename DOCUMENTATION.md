@@ -26,34 +26,61 @@ The DuckDB OneLake extension enables seamless integration between DuckDB and Mic
 - **Secure Access**: Full integration with Azure Active Directory for secure data access
 - **Delta Write Support**: Append-only `INSERT` pipelines that stream DuckDB chunks into the bundled Rust Delta writer
 
+## Request Workflow
+
+The following diagram illustrates the flow of a request from attachment to data retrieval, highlighting the performance optimizations:
+
 ```mermaid
-graph TD
-    A[DuckDB Client] --> B[OneLake Extension]
-    B --> C[Authentication Layer]
-    B --> D[Catalog System]
-    B --> E[Table Discovery]
-    B --> P[Parser Extension]
+sequenceDiagram
+    participant User
+    participant DuckDB
+    participant OneLakeTableSet
+    participant OneLakeTableEntry
+    participant OneLakeAPI
+    participant SecretManager
+    participant FabricAPI
+    participant Storage
+
+    User->>DuckDB: ATTACH 'workspace/lakehouse.Lakehouse'
+    DuckDB->>OneLakeTableSet: LoadEntries()
+    OneLakeTableSet->>OneLakeAPI: GetTables() (Fabric API)
+    OneLakeAPI->>FabricAPI: GET /tables
+    FabricAPI-->>OneLakeAPI: List of Tables
+    OneLakeAPI-->>OneLakeTableSet: Table List
     
-    C --> F[Service Principal]
-    C --> G[Azure CLI]
-    C --> H[Credential Chain]
+    alt No tables found via API
+        OneLakeTableSet->>OneLakeTableSet: DiscoverTablesFromStorage()
+        OneLakeTableSet->>Storage: List Directory (DFS)
+        Storage-->>OneLakeTableSet: Directory Entries
+    end
+
+    OneLakeTableSet-->>DuckDB: Catalog Ready (Metadata Lazy)
+
+    User->>DuckDB: SELECT * FROM table
+    DuckDB->>OneLakeTableEntry: GetScanFunction()
     
-    D --> I[OneLake Catalog]
-    I --> J[Schema Set - Lakehouses]
-    J --> K[Table Set - Multi-Format Tables]
-    K --> K1[Delta Tables]
-    K --> K2[Iceberg Tables]
+    alt Details not loaded
+        OneLakeTableEntry->>OneLakeTableEntry: EnsureDetailsLoaded()
+        OneLakeTableEntry->>OneLakeAPI: GetTableInfo()
+        OneLakeAPI->>FabricAPI: GET /tables/{name}
+        FabricAPI-->>OneLakeAPI: Table Details
+    end
+
+    OneLakeTableEntry->>OneLakeTableEntry: Resolve Path (Cache Check)
     
-    P --> Q[USING ICEBERG Syntax]
-    P --> R[Direct iceberg_scan Calls]
+    alt Path not cached
+        OneLakeTableEntry->>OneLakeTableEntry: BuildLocationCandidates()
+        OneLakeTableEntry->>Storage: Probe Paths (HEAD/LIST)
+        Storage-->>OneLakeTableEntry: Valid Path
+    end
+
+    OneLakeTableEntry->>SecretManager: EnsureHttpBearerSecret()
+    SecretManager->>SecretManager: Check Hash (Optimization)
     
-    E --> L[Fabric API]
-    E --> M[Storage Discovery]
-    M --> M1[_delta_log Detection]
-    M --> M2[metadata/ Detection]
-    
-    L --> N[Microsoft Fabric]
-    M --> O[Azure Data Lake Storage]
+    OneLakeTableEntry-->>DuckDB: Scan Function (Delta/Iceberg)
+    DuckDB->>Storage: Read Data
+    Storage-->>DuckDB: Result Set
+    DuckDB-->>User: Results
 ```
 
 ## Architecture
@@ -206,7 +233,7 @@ SET VARIABLE AZURE_STORAGE_TOKEN = '<preissued_onelake_access_token>';
 
 During secret creation the extension records the chosen variable names so that token resolution uses the right sources
 even if the session settings change later. When Delta scans contact the DFS (`https://onelake.dfs...`) host, the
-extension registers HTTP bearer secrets so each scope receives the token minted for the DFS audience.
+extension registers HTTP bearer secrets so each scope receives the token minted for the DFS audience. To optimize performance, the extension calculates a hash of the requested scopes and token; if the hash matches the last registered secret, the expensive registration step is skipped.
 
 Each `ATTACH ... (TYPE ONELAKE)` run replays an env-aware bootstrap sequence:
 
@@ -401,41 +428,34 @@ graph TD
 
 ### Table Loading Process
 
-The table loading process is implemented in the `OneLakeTableSet::LoadEntries` method:
+### Table Loading Process
+
+The table loading process is implemented in the `OneLakeTableSet::LoadEntries` method. To optimize performance, the extension employs a lazy loading strategy and gates expensive storage discovery:
 
 ```cpp
-// From: src/storage/onelake_table_set.cpp:158-200
+// From: src/storage/onelake_table_set.cpp
 void OneLakeTableSet::LoadEntries(ClientContext &context) {
-    auto &onelake_catalog = catalog.Cast<OneLakeCatalog>();
-    
-    // Get lakehouse ID from schema data
-    auto lakehouse_id = schema.schema_data->id;
-    auto lakehouse_name = schema.schema_data->name;
-    
     // Phase 1: Get tables from OneLake API
-    auto &credentials = onelake_catalog.GetCredentials();
-    auto tables = OneLakeAPI::GetTables(context, 
-                                       onelake_catalog.GetWorkspaceId(), 
-                                       lakehouse_id, credentials);
+    // This only fetches the list of tables and basic metadata.
+    // Detailed metadata (schema, partitions) is fetched lazily upon access.
+    auto tables = OneLakeAPI::GetTables(context, ...);
     
-    std::unordered_set<string> seen_names;
     idx_t api_count = 0;
-    
-    // Process API-discovered tables
     for (auto &table : tables) {
-        auto table_entry = make_uniq<OneLakeTableEntry>(
-            catalog, schema, table.name, table.id, table.format, table.location);
-        
+        // Create entry with basic info; details loaded later
         CreateEntry(std::move(table_entry));
-        seen_names.insert(StringUtil::Lower(table.name));
         api_count++;
     }
     
-    // Phase 2: Discover additional tables from storage
-    auto storage_count = DiscoverTablesFromStorage(context, onelake_catalog, 
-                                                  schema, *this, seen_names);
+    // Phase 2: Discover additional tables from storage (DFS Fallback)
+    // Only performed if API returns no tables to avoid unnecessary network calls
+    if (api_count == 0) {
+        DiscoverTablesFromStorage(context, ...);
+    }
 }
 ```
+
+### API-Based Table Discovery
 
 ### API-Based Table Discovery
 
@@ -521,32 +541,27 @@ static idx_t DiscoverTablesFromStorage(ClientContext &context,
 
 ### Table Information Retrieval
 
-For each discovered table, the extension can retrieve detailed metadata:
+For each discovered table, the extension retrieves detailed metadata lazily when the table is first accessed:
 
 ```cpp
-// From: src/storage/onelake_table_set.cpp:343-370
-unique_ptr<OneLakeTableInfo> OneLakeTableSet::GetTableInfo(ClientContext &context, 
-                                                           const string &table_name) {
-    // Create table info structure
-    auto table_info = make_uniq<OneLakeTableInfo>();
-    table_info->name = table_name;
+// From: src/storage/onelake_table_entry.cpp
+void OneLakeTableEntry::EnsureDetailsLoaded(ClientContext &context) {
+    if (details_loaded) return;
+
+    // Fetch detailed info (location, partitions) from API
+    auto table_info = OneLakeAPI::GetTableInfo(...);
     
-    // Default location if not specified
-    if (table_info->location.empty()) {
-        table_info->location = "Tables/" + table_name;
+    if (table_info.has_metadata) {
+        table_data->location = table_info.location;
+        SetPartitionColumns(table_info.partition_columns);
     }
     
-    // Bind through table entry to get schema information
-    OneLakeTableEntry temp_entry(catalog, schema, *table_info);
-    unique_ptr<FunctionData> temp_bind_data;
-    auto table_function = temp_entry.GetScanFunction(context, temp_bind_data);
-    
-    // Extract column definitions from the binding process
-    for (auto &column : temp_entry.GetColumns().Logical()) {
-        table_info->create_info->columns.AddColumn(column.Copy());
-    }
-    
-    return table_info;
+    details_loaded = true;
+}
+
+TableFunction OneLakeTableEntry::GetScanFunction(...) {
+    EnsureDetailsLoaded(context);
+    // ... proceed to bind scan function ...
 }
 ```
 
