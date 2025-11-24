@@ -32,3 +32,5 @@ local-test
 scripts/delta-write-test.py
 docs/create_update_plan.md
 docs/delta_write_support_plan.md
+duckdb_onelake/
+_codeql_detected_source_root
