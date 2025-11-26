@@ -25,6 +25,24 @@ static void LoadInternal(ExtensionLoader &loader) {
 		                          "Environment variable name that stores the OneLake storage access token",
 		                          LogicalType::VARCHAR, Value(ONELAKE_DEFAULT_ENV_STORAGE_TOKEN_VARIABLE));
 	}
+	
+	// Phase 1: Write mode configuration options
+	config.AddExtensionOption("onelake_insert_mode",
+	                          "Default INSERT mode (append|overwrite|error_if_exists|ignore)",
+	                          LogicalType::VARCHAR, Value("append"));
+	config.AddExtensionOption("onelake_schema_mode",
+	                          "Schema evolution mode (empty|merge|overwrite)",
+	                          LogicalType::VARCHAR, Value(""));
+	config.AddExtensionOption("onelake_safe_cast",
+	                          "Enable safe type casting during writes",
+	                          LogicalType::BOOLEAN, Value(false));
+	config.AddExtensionOption("onelake_target_file_size",
+	                          "Target Parquet file size in bytes (0 = default)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+	config.AddExtensionOption("onelake_write_batch_size",
+	                          "Number of rows per write batch (0 = default)",
+	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+	
 	config.storage_extensions["onelake"] = make_uniq<OneLakeStorageExtension>();
 #ifdef DUCKDB_BUILD_LOADABLE_EXTENSION
 	config.parser_extensions.push_back(CreateOneLakeParserExtension());
