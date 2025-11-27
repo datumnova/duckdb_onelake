@@ -17,6 +17,12 @@ enum class OlDeltaStatus : int32_t {
 	InternalError = 100,
 };
 
+int ol_delta_create_table(const char *table_uri, const char *schema_json, const char *token_json,
+                          const char *options_json, char *error_buffer, uintptr_t error_buffer_len);
+
+int ol_delta_drop_table(const char *table_uri, const char *token_json, const char *options_json, char *error_buffer,
+                        uintptr_t error_buffer_len);
+
 int ol_delta_append(ArrowArrayStream *stream, const char *table_uri, const char *token_json, const char *options_json,
                     char *error_buffer, uintptr_t error_buffer_len);
 

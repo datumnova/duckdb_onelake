@@ -151,4 +151,125 @@ void OneLakeDeltaWriter::Append(ClientContext &context, DataChunk &chunk, const 
 	}
 }
 
+void OneLakeDeltaWriter::CreateTable(ClientContext &context, const string &table_uri,
+                                     const vector<ColumnDefinition> &columns, const string &token_json,
+                                     const string &options_json) {
+	// Convert DuckDB column definitions to Arrow schema JSON
+	// We'll use ArrowConverter to get proper Arrow type mappings
+	vector<LogicalType> types;
+	vector<string> names;
+	types.reserve(columns.size());
+	names.reserve(columns.size());
+	
+	for (const auto &col : columns) {
+		types.push_back(col.Type());
+		names.push_back(col.GetName());
+	}
+	
+	// Create a minimal Arrow schema using ArrowConverter
+	ArrowSchema arrow_schema;
+	auto client_props = context.GetClientProperties();
+	ArrowConverter::ToArrowSchema(&arrow_schema, types, names, client_props);
+	
+	// Convert ArrowSchema to JSON - serialize to match Arrow's Field format
+	string schema_json = "{\"fields\":[";
+	for (idx_t i = 0; i < columns.size(); i++) {
+		if (i > 0) schema_json += ",";
+		
+		const auto &col = columns[i];
+		const auto &type = col.Type();
+		
+		schema_json += "{\"name\":\"" + col.GetName() + "\",";
+		
+		// Map DuckDB types to Arrow DataType enum strings
+		schema_json += "\"data_type\":";
+		switch (type.id()) {
+			case LogicalTypeId::BOOLEAN:
+				schema_json += "\"Boolean\"";
+				break;
+			case LogicalTypeId::TINYINT:
+				schema_json += "\"Int8\"";
+				break;
+			case LogicalTypeId::SMALLINT:
+				schema_json += "\"Int16\"";
+				break;
+			case LogicalTypeId::INTEGER:
+				schema_json += "\"Int32\"";
+				break;
+			case LogicalTypeId::BIGINT:
+				schema_json += "\"Int64\"";
+				break;
+			case LogicalTypeId::FLOAT:
+				schema_json += "\"Float32\"";
+				break;
+			case LogicalTypeId::DOUBLE:
+				schema_json += "\"Float64\"";
+				break;
+			case LogicalTypeId::VARCHAR:
+				schema_json += "\"Utf8\"";
+				break;
+			case LogicalTypeId::DATE:
+				schema_json += "\"Date32\"";
+				break;
+			case LogicalTypeId::TIMESTAMP:
+				schema_json += "{\"Timestamp\":[\"Microsecond\",null]}";
+				break;
+			case LogicalTypeId::DECIMAL: {
+				auto width = DecimalType::GetWidth(type);
+				auto scale = DecimalType::GetScale(type);
+				schema_json += "{\"Decimal\":[" + to_string(width) + "," + to_string(scale) + ",128]}";
+				break;
+			}
+			default:
+				// Fallback to string for unsupported types
+				schema_json += "\"Utf8\"";
+				break;
+		}
+		
+		schema_json += ",\"nullable\":true";
+		schema_json += ",\"dict_id\":0";
+		schema_json += ",\"dict_is_ordered\":false";
+		schema_json += ",\"metadata\":{}";
+		schema_json += "}";
+	}
+	schema_json += "],\"metadata\":{}}";
+	
+	// Clean up the Arrow schema
+	if (arrow_schema.release) {
+		arrow_schema.release(&arrow_schema);
+	}
+	
+	std::array<char, 1024> error_buffer {};
+	
+	const char *table_uri_cstr = table_uri.c_str();
+	const char *schema_json_cstr = schema_json.c_str();
+	const char *token_json_cstr = token_json.empty() ? "" : token_json.c_str();
+	const char *options_json_cstr = options_json.empty() ? "" : options_json.c_str();
+	
+	const auto status = ol_delta_create_table(table_uri_cstr, schema_json_cstr, token_json_cstr,
+	                                          options_json_cstr, error_buffer.data(), error_buffer.size());
+	
+	if (status != static_cast<int>(OlDeltaStatus::Ok)) {
+		string error_msg = error_buffer[0] ? string(error_buffer.data()) : "Unknown table creation error";
+		throw IOException("Delta table creation failed: %s", error_msg.c_str());
+	}
+}
+
+void OneLakeDeltaWriter::DropTable(ClientContext &context, const string &table_uri, const string &token_json,
+                                   const string &options_json) {
+	std::array<char, 4096> error_buffer {};
+	
+	const char *table_uri_cstr = table_uri.c_str();
+	const char *token_json_cstr = token_json.empty() ? "" : token_json.c_str();
+	const char *options_json_cstr = options_json.empty() ? "{\"deleteData\":true}" : options_json.c_str();
+	
+	const auto status = ol_delta_drop_table(table_uri_cstr, token_json_cstr, options_json_cstr, error_buffer.data(),
+	                                        error_buffer.size());
+	
+	if (status != static_cast<int>(OlDeltaStatus::Ok)) {
+		string error_msg = error_buffer[0] ? string(error_buffer.data()) : "Unknown drop table error";
+		throw IOException("Delta table drop failed: %s", error_msg.c_str());
+	}
+}
+
 } // namespace duckdb

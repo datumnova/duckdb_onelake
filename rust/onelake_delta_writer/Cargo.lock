@@ -2239,6 +2239,7 @@ dependencies = [
  "arrow",
  "cbindgen",
  "deltalake",
+ "futures-util",
  "once_cell",
  "serde",
  "serde_json",

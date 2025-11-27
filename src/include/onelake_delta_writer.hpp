@@ -2,6 +2,7 @@
 
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/string.hpp"
+#include "duckdb/parser/column_definition.hpp"
 
 #include <vector>
 
@@ -30,6 +31,15 @@ class OneLakeDeltaWriter {
 public:
 	//! Converts the provided chunk into Arrow IPC and forwards it to the Rust delta writer.
 	static void Append(ClientContext &context, DataChunk &chunk, const OneLakeDeltaWriteRequest &request);
+	
+	//! Creates a new Delta table in OneLake storage with the specified schema.
+	static void CreateTable(ClientContext &context, const string &table_uri, const vector<ColumnDefinition> &columns,
+	                        const string &token_json, const string &options_json);
+	
+	//! Drops (deletes) a Delta table from OneLake storage.
+	//! WARNING: This is a destructive operation!
+	static void DropTable(ClientContext &context, const string &table_uri, const string &token_json,
+	                      const string &options_json);
 };
 
 } // namespace duckdb

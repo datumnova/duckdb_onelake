@@ -42,6 +42,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("onelake_write_batch_size",
 	                          "Number of rows per write batch (0 = default)",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
+	config.AddExtensionOption("onelake_partition_columns",
+	                          "Comma-separated list of partition columns for the next CREATE TABLE",
+	                          LogicalType::VARCHAR, Value());
+
+	// Phase 3: Safety gate for destructive operations
+	config.AddExtensionOption("onelake_allow_destructive_operations",
+	                          "Allow destructive operations like DROP TABLE (default: false)",
+	                          LogicalType::BOOLEAN, Value(false));
 	
 	config.storage_extensions["onelake"] = make_uniq<OneLakeStorageExtension>();
 #ifdef DUCKDB_BUILD_LOADABLE_EXTENSION

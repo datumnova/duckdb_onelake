@@ -27,7 +27,9 @@ optional_ptr<CatalogEntry> OneLakeCatalogSet::GetEntry(ClientContext &context, c
 }
 
 void OneLakeCatalogSet::DropEntry(ClientContext &context, DropInfo &info) {
-	throw NotImplementedException("OneLakeCatalogSet::DropEntry");
+	// Default: OneLake catalog sets don't support drops
+	// Subclasses like OneLakeTableSet can override to add drop support
+	throw NotImplementedException("DROP not supported for this OneLake catalog set type");
 }
 
 void OneLakeCatalogSet::EraseEntryInternal(const string &name) {

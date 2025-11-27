@@ -1,0 +1,58 @@
+# name: test/sql/onelake_drop_table.test
+# description: Test DROP TABLE for OneLake extension
+# group: [onelake]
+
+# Skip test if no credentials available
+require onelake
+
+# Create a temp table to drop
+statement ok
+CREATE TABLE test_drop_basic (id INTEGER, name VARCHAR);
+
+# Verify table exists
+query I
+SELECT COUNT(*) FROM duckdb_tables() WHERE table_name = 'test_drop_basic';
+----
+1
+
+# DROP TABLE should fail without setting
+statement error
+DROP TABLE test_drop_basic;
+----
+DROP TABLE is disabled
+
+# Enable destructive operations
+statement ok
+SET onelake_allow_destructive_operations = true;
+
+# DROP TABLE should succeed now
+statement ok
+DROP TABLE test_drop_basic;
+
+# Verify table no longer exists
+query I
+SELECT COUNT(*) FROM duckdb_tables() WHERE table_name = 'test_drop_basic';
+----
+0
+
+# Test DROP TABLE IF EXISTS on non-existent table
+statement ok
+DROP TABLE IF EXISTS non_existent_table;
+
+# Test DROP TABLE on non-existent table without IF EXISTS
+statement error
+DROP TABLE non_existent_table;
+----
+not found
+
+# Create another table for cascade test
+statement ok
+CREATE TABLE test_drop_cascade (id INTEGER, data VARCHAR);
+
+# DROP TABLE should succeed
+statement ok
+DROP TABLE test_drop_cascade;
+
+# Reset setting
+statement ok
+SET onelake_allow_destructive_operations = false;

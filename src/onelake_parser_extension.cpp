@@ -26,6 +26,25 @@ string BuildAbfssPath(const string &workspace_id, const string &lakehouse_id, co
 	       ONELAKE_TABLES_PATH_SEGMENT + table_name;
 }
 
+struct OneLakeCreateTableParseData : public ParserExtensionParseData {
+	string partition_columns;
+	string original_query;
+
+	unique_ptr<ParserExtensionParseData> Copy() const override {
+		auto result = make_uniq<OneLakeCreateTableParseData>();
+		result->partition_columns = partition_columns;
+		result->original_query = original_query;
+		return result;
+	}
+
+	string ToString() const override {
+		string result = "SET onelake_partition_columns = '" + partition_columns + "'; ";
+		result += original_query + "; ";
+		result += "SET onelake_partition_columns = NULL;";
+		return result;
+	}
+};
+
 struct OneLakeIcebergParseData : public ParserExtensionParseData {
 	string catalog;
 	string schema;
@@ -88,12 +107,88 @@ bool TryParseQualifiedName(const string &input, OneLakeIcebergParseData &out) {
 
 } // namespace
 
+// Extract PARTITION BY clause and remove it from query, storing columns in modified query
+string ExtractAndRemovePartitionBy(const string &query, vector<string> &partition_columns) {
+	auto upper = StringUtil::Upper(query);
+	auto pos = upper.find("PARTITION BY");
+	if (pos == string::npos) {
+		return query;
+	}
+	
+	// Find opening parenthesis after PARTITION BY
+	size_t paren_start = pos + 12; // strlen("PARTITION BY")
+	while (paren_start < query.size() && isspace(query[paren_start])) {
+		paren_start++;
+	}
+	if (paren_start >= query.size() || query[paren_start] != '(') {
+		return query;
+	}
+	
+	// Find matching closing parenthesis
+	size_t paren_end = paren_start + 1;
+	int depth = 1;
+	while (paren_end < query.size() && depth > 0) {
+		if (query[paren_end] == '(') {
+			depth++;
+		} else if (query[paren_end] == ')') {
+			depth--;
+		}
+		paren_end++;
+	}
+	if (depth != 0) {
+		return query;
+	}
+	paren_end--; // Point to the ')'
+	
+	// Extract column names
+	string col_list = query.substr(paren_start + 1, paren_end - paren_start - 1);
+	StringUtil::Trim(col_list);
+	auto parts = StringUtil::Split(col_list, ',');
+	for (auto &part : parts) {
+		StringUtil::Trim(part);
+		if (!part.empty()) {
+			partition_columns.push_back(part);
+		}
+	}
+	
+	// Remove PARTITION BY clause from query - just return the CREATE TABLE without it
+	string result = query.substr(0, pos);
+	StringUtil::RTrim(result);
+	
+	// Append any remaining content after PARTITION BY (like semicolons)
+	if (paren_end + 1 < query.size()) {
+		string remainder = query.substr(paren_end + 1);
+		StringUtil::Trim(remainder);
+		if (!remainder.empty()) {
+			result += remainder;
+		}
+	}
+	
+	return result;
+}
+
 ParserExtensionParseResult OneLakeUsingIcebergParse(ParserExtensionInfo *, const string &query) {
 	auto normalized = TrimmedWithoutSemicolon(query);
 	if (normalized.empty()) {
 		return ParserExtensionParseResult();
 	}
+	
 	auto upper = StringUtil::Upper(normalized);
+	
+	// Check for PARTITION BY in CREATE TABLE - return error with rewritten syntax
+	if (StringUtil::StartsWith(upper, "CREATE TABLE") && upper.find("PARTITION BY") != string::npos) {
+		vector<string> partition_columns;
+		string modified_query = ExtractAndRemovePartitionBy(normalized, partition_columns);
+		
+		if (!partition_columns.empty()) {
+			string error_msg = "PARTITION BY syntax is not directly supported. Use this instead:\n\n";
+			error_msg += "SET onelake_partition_columns = '" + StringUtil::Join(partition_columns, ",") + "';\n";
+			error_msg += modified_query + ";";
+			return ParserExtensionParseResult(error_msg);
+		}
+	}
+	
+	// Handle USING ICEBERG queries
 	const string prefix = "SELECT * FROM ";
 	const string suffix = " USING ICEBERG";
 	if (!StringUtil::StartsWith(upper, prefix) || !StringUtil::EndsWith(upper, suffix)) {

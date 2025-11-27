@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
 use std::os::raw::c_int;
 use std::slice;
+use std::sync::Arc;
 
 use deltalake::arrow::error::ArrowError;
 use deltalake::arrow::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
@@ -22,6 +23,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::runtime::Runtime;
+use futures_util::StreamExt; // for .next() on streams during drop table
 
 /// Result codes returned over the C ABI.
 #[repr(i32)]
@@ -341,6 +343,100 @@ fn append_impl(
     perform_write(table_uri.to_string(), options, tokens, batches)
 }
 
+fn create_table_impl(
+    table_uri: &str,
+    schema_json: &str,
+    token_json: &str,
+    options_json: &str,
+) -> Result<(), DeltaFfiError> {
+    let table_uri = table_uri.trim();
+    if table_uri.is_empty() {
+        return Err(DeltaFfiError::InvalidInput(
+            "table_uri must not be empty".into(),
+        ));
+    }
+
+    let tokens: TokenPayload = parse_json_or_default(token_json)?;
+    let options: WriteOptions = parse_json_or_default(options_json)?;
+
+    // Parse Arrow schema from JSON
+    let arrow_schema: Arc<deltalake::arrow::datatypes::Schema> = 
+        Arc::new(serde_json::from_str(schema_json)?);
+
+    ensure_storage_handlers_registered();
+
+    let storage_options = merge_storage_options(HashMap::new(), &tokens);
+    let partition_columns = options.partition_columns.clone();
+    let table_name = options.table_name.clone();
+    let description = options.description.clone();
+    let configuration = options.configuration.clone();
+
+    runtime()?.block_on(async move {
+        let ops = if storage_options.is_empty() {
+            DeltaOps::try_from_uri(&table_uri).await?
+        } else {
+            DeltaOps::try_from_uri_with_storage_options(&table_uri, storage_options).await?
+        };
+
+        let mut builder = ops.create()
+            .with_columns(
+                arrow_schema.fields().iter()
+                    .map(|f| deltalake::kernel::StructField::try_from(f.as_ref()))
+                    .collect::<Result<Vec<_>, _>>()?
+            );
+
+        if !partition_columns.is_empty() {
+            builder = builder.with_partition_columns(partition_columns);
+        }
+
+        if let Some(name) = table_name {
+            builder = builder.with_table_name(name);
+        }
+
+        if let Some(desc) = description {
+            builder = builder.with_comment(desc);
+        }
+
+        if !configuration.is_empty() {
+            builder = builder.with_configuration(configuration);
+        }
+
+        builder.await?;
+
+        Ok::<(), DeltaTableError>(())
+    })?;
+
+    Ok(())
+}
+
+/// Creates a new Delta table in OneLake storage.
+#[no_mangle]
+pub extern "C" fn ol_delta_create_table(
+    table_uri: *const c_char,
+    schema_json: *const c_char,
+    token_json: *const c_char,
+    options_json: *const c_char,
+    error_buffer: *mut c_char,
+    error_buffer_len: usize,
+) -> c_int {
+    let result = (|| -> Result<(), DeltaFfiError> {
+        let table_uri = read_cstr(table_uri)?;
+        let schema_json = read_cstr(schema_json)?;
+        let token_json = read_cstr(token_json)?;
+        let options_json = read_cstr(options_json)?;
+
+        create_table_impl(&table_uri, &schema_json, &token_json, &options_json)
+    })();
+
+    match result {
+        Ok(()) => OlDeltaStatus::Ok as c_int,
+        Err(err) => {
+            write_error_message(error_buffer, error_buffer_len, &err.message());
+            err.status() as c_int
+        }
+    }
+}
+
 /// Appends a batch of rows (represented as an ArrowArrayStream) into a Delta table.
 #[no_mangle]
 pub extern "C" fn ol_delta_append(
@@ -365,6 +461,127 @@ pub extern "C" fn ol_delta_append(
             err.status() as c_int
         }
     }
+}
+
+/// Drops (deletes) a Delta table from storage.
+/// WARNING: This is a destructive operation!
+#[no_mangle]
+pub extern "C" fn ol_delta_drop_table(
+    table_uri: *const c_char,
+    token_json: *const c_char,
+    options_json: *const c_char,
+    error_buffer: *mut c_char,
+    error_buffer_len: usize,
+) -> c_int {
+    let result = (|| -> Result<(), DeltaFfiError> {
+        let table_uri = read_cstr(table_uri)?;
+        let token_json = read_cstr(token_json)?;
+        let options_json = read_cstr(options_json)?;
+
+        drop_table_impl(&table_uri, &token_json, &options_json)
+    })();
+
+    match result {
+        Ok(()) => OlDeltaStatus::Ok as c_int,
+        Err(err) => {
+            write_error_message(error_buffer, error_buffer_len, &err.message());
+            err.status() as c_int
+        }
+    }
+}
+
+fn drop_table_impl(
+    table_uri: &str,
+    token_json: &str,
+    options_json: &str,
+) -> Result<(), DeltaFfiError> {
+    let table_uri = table_uri.trim();
+    if table_uri.is_empty() {
+        return Err(DeltaFfiError::InvalidInput(
+            "table_uri must not be empty".into(),
+        ));
+    }
+
+    let tokens: TokenPayload = parse_json_or_default(token_json)?;
+    let options: DropTableOptions = parse_json_or_default(options_json)?;
+
+    ensure_storage_handlers_registered();
+
+    let storage_options = merge_storage_options(HashMap::new(), &tokens);
+
+    runtime()?.block_on(async move {
+        // Open the table to get access to object store
+        let table = if storage_options.is_empty() {
+            deltalake::open_table(&table_uri).await?
+        } else {
+            deltalake::open_table_with_storage_options(&table_uri, storage_options).await?
+        };
+
+        // Get object store for deletion operations
+        let object_store = table.object_store();
+
+        // Delete _delta_log directory and its contents
+        use deltalake::storage::ObjectStoreError;
+
+        let delta_log_path = deltalake::Path::from("_delta_log");
+        let mut log_files = object_store.list(Some(&delta_log_path));
+
+        // Collect all paths to delete
+        let mut paths_to_delete = Vec::new();
+        while let Some(result) = log_files.next().await {
+            let meta = result?;
+            paths_to_delete.push(meta.location.clone());
+        }
+
+        // Delete all log files
+        for path in paths_to_delete {
+            object_store.delete(&path).await.map_err(|e| {
+                DeltaTableError::ObjectStore {
+                    source: ObjectStoreError::Generic {
+                        store: "azure",
+                        source: Box::new(e),
+                    },
+                }
+            })?;
+        }
+
+        // Optionally delete data files
+        if options.delete_data {
+            let root_path = deltalake::Path::from("");
+            let mut all_files = object_store.list(Some(&root_path));
+
+            let mut data_paths = Vec::new();
+            while let Some(result) = all_files.next().await {
+                let meta = result?;
+                // Skip _delta_log entries (already deleted)
+                if !meta.location.as_ref().starts_with("_delta_log") {
+                    data_paths.push(meta.location.clone());
+                }
+            }
+
+            for path in data_paths {
+                object_store.delete(&path).await.map_err(|e| {
+                    DeltaTableError::ObjectStore {
+                        source: ObjectStoreError::Generic {
+                            store: "azure",
+                            source: Box::new(e),
+                        },
+                    }
+                })?;
+            }
+        }
+
+        Ok::<(), DeltaTableError>(())
+    })?;
+
+    Ok(())
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+#[serde(default, rename_all = "camelCase")]
+struct DropTableOptions {
+    /// If true, delete data files; if false, only remove transaction logs
+    delete_data: bool,
 }
 
 #[cfg(test)]
