@@ -100,6 +100,19 @@ public:
 	static string GetAccessToken(OneLakeCredentials &credentials,
 	                             OneLakeTokenAudience audience = OneLakeTokenAudience::Fabric);
 
+	/// @brief Drops a Unity Catalog-backed Delta table from Fabric catalog (not storage).
+	/// @param context The client context.
+	/// @param workspace_id The workspace ID.
+	/// @param lakehouse The lakehouse object (id and name required).
+	/// @param schema_name Schema name for schema-enabled lakehouses; may be empty for flat lakehouses.
+	/// @param table_name Table to drop.
+	/// @param credentials Credentials for auth.
+	/// @param allow_not_found If true, 404 is ignored.
+	static void DropUnityCatalogTable(ClientContext &context, const string &workspace_id,
+	                                 const OneLakeLakehouse &lakehouse, const string &schema_name,
+	                                 const string &table_name, OneLakeCredentials &credentials,
+	                                 bool allow_not_found = true);
+
 private:
 	static string MakeAPIRequest(ClientContext &context, const string &url, OneLakeCredentials &credentials,
 	                             bool allow_not_found = false);

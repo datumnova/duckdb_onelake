@@ -657,6 +657,18 @@ void OneLakeTableSet::DropEntry(ClientContext &context, DropInfo &info) {
 		throw NotImplementedException("Only DROP TABLE is supported for OneLake tables");
 	}
 
+	// EARLY permission check before any API or metadata calls
+	bool allow_destructive = false;
+	Value setting_value;
+	if (context.TryGetCurrentSetting("onelake_allow_destructive_operations", setting_value)) {
+		allow_destructive = BooleanValue::Get(setting_value);
+	}
+	if (!allow_destructive) {
+		throw PermissionException(
+		    "DROP TABLE is disabled. Set 'onelake_allow_destructive_operations = true' to enable.");
+	}
+
+	// Now proceed with normal DROP logic
 	EnsureFresh(context);
 	auto existing_entry = GetEntry(context, info.name);
 	if (!existing_entry) {
@@ -679,30 +691,43 @@ void OneLakeTableSet::DropEntry(ClientContext &context, DropInfo &info) {
 	string table_uri = "abfss://" + workspace_id + "@onelake.dfs.fabric.microsoft.com/" +
 	                   lakehouse_id + "/Tables/" + info.name + "/";
 
-	// Safety setting to allow destructive operations
-	bool allow_destructive = false;
-	Value setting_value;
-	if (context.TryGetCurrentSetting("onelake_allow_destructive_operations", setting_value)) {
-		allow_destructive = BooleanValue::Get(setting_value);
-	}
-	if (!allow_destructive) {
-		throw PermissionException(
-		    "DROP TABLE is disabled. Set 'onelake_allow_destructive_operations = true' to enable.");
-	}
-
 	// Build token/options and drop from storage
 	string token_json = "{\"storageToken\":\"" +
 	                    OneLakeAPI::GetAccessToken(onelake_catalog.GetCredentials(), OneLakeTokenAudience::OneLakeDfs) +
 	                    "\"}";
 	string options_json = "{\"deleteData\":true}";
 
+	// --- Performance profiling: log timing for storage delete ---
+	auto t_start_storage = std::chrono::high_resolution_clock::now();
 	ONELAKE_LOG_INFO(&context, "[drop_table] Dropping table: %s", info.name.c_str());
 	try {
 		OneLakeDeltaWriter::DropTable(context, table_uri, token_json, options_json);
 	} catch (std::exception &ex) {
-		ONELAKE_LOG_ERROR(&context, "[drop_table] Failed to drop table %s: %s", info.name.c_str(), ex.what());
+		ONELAKE_LOG_ERROR(&context, "[drop_table] Failed to drop table %s storage: %s", info.name.c_str(), ex.what());
 		throw;
 	}
+	auto t_end_storage = std::chrono::high_resolution_clock::now();
+	double storage_secs = std::chrono::duration<double>(t_end_storage - t_start_storage).count();
+	ONELAKE_LOG_INFO(&context, "[drop_table] Storage delete time: %.3fs", storage_secs);
+
+	// --- Performance profiling: log timing for catalog delete ---
+	auto t_start_catalog = std::chrono::high_resolution_clock::now();
+	try {
+		const auto &lakehouse = *schema_entry.schema_data;
+		// Prefer explicit schema if schema-enabled; otherwise, attempt default schema if present
+		string uc_schema = lakehouse.schema_enabled ? schema.name : lakehouse.default_schema;
+		OneLakeAPI::DropUnityCatalogTable(context, workspace_id, lakehouse, uc_schema, info.name,
+		                                  onelake_catalog.GetCredentials(), /*allow_not_found=*/true);
+		ONELAKE_LOG_INFO(&context, "[drop_table] Dropped Unity Catalog entry: %s", info.name.c_str());
+	} catch (std::exception &ex) {
+		// Don't fail the DROP if catalog cleanup fails; the storage was already removed.
+		ONELAKE_LOG_WARN(&context, "[drop_table] Unity Catalog cleanup failed for %s: %s", info.name.c_str(), ex.what());
+	}
+	auto t_end_catalog = std::chrono::high_resolution_clock::now();
+	double catalog_secs = std::chrono::duration<double>(t_end_catalog - t_start_catalog).count();
+	ONELAKE_LOG_INFO(&context, "[drop_table] Catalog delete time: %.3fs", catalog_secs);
+
+	// TODO: If table is partitioned or has many files, consider bulk/parallel delete for storage for further speedup.
 
 	// Remove from catalog cache
 	EraseEntryInternal(info.name);
