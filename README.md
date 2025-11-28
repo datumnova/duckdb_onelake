@@ -24,7 +24,6 @@ DISCLAIMER: Currently, this extension is in an experimental phase..
 
 ### Current Limitations
 
-- The extension only works with normal lakehouses; schema-enabled lakehouses still fail to attach due to a Fabric API limitation ([details](https://learn.microsoft.com/en-us/fabric/data-engineering/lakehouse-schemas#public-preview-limitations)).
 - Iceberg remains read-only for now; all write paths target Delta tables.
 - `DROP TABLE` currently removes the catalog entry only. It does **not** delete the backing folders or `_delta_log` files inside the OneLake lakehouse, even when those directories are empty.
 - `DELETE` and `UPDATE` do not support `RETURNING` clauses yet.
@@ -37,7 +36,7 @@ For more detailed documentation on the Onelake extension, including architecture
 ## Running the extension
 
 # Prerequisites
-To use the Onelake extension, you need to have access to a OneLake workspace and lakehouse. You will also need to have the necessary credentials for a service principal (tenant ID, client ID, and client secret) to authenticate with Azure, this extension was tested using a Workspace identity. Please follow the steps documented here : https://learn.microsoft.com/en-us/fabric/security/workspace-identity.
+To use the Onelake extension, you need to have access to a OneLake workspace and lakehouse. You will also need to have the necessary credentials for a service principal, azure cli, or an azure storage token & Fabric token (tenant ID, client ID, and client secret) to authenticate with Azure, this extension was tested using a Workspace identity. Please follow the steps documented here : https://learn.microsoft.com/en-us/fabric/security/workspace-identity.
 
 To run the extension code, simply start the shell with `./build/release/duckdb`.
 
@@ -193,8 +192,6 @@ CREATE TABLE lakehouse.sales (
     sale_date DATE,
     amount DECIMAL(18,2)
 ) PARTITION BY (region, sale_date)
-WITH (
-    description = 'Daily sales snapshot'
 );
 ```
 
