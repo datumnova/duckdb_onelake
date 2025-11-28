@@ -109,9 +109,9 @@ public:
 	/// @param credentials Credentials for auth.
 	/// @param allow_not_found If true, 404 is ignored.
 	static void DropUnityCatalogTable(ClientContext &context, const string &workspace_id,
-	                                 const OneLakeLakehouse &lakehouse, const string &schema_name,
-	                                 const string &table_name, OneLakeCredentials &credentials,
-	                                 bool allow_not_found = true);
+	                                  const OneLakeLakehouse &lakehouse, const string &schema_name,
+	                                  const string &table_name, OneLakeCredentials &credentials,
+	                                  bool allow_not_found = true);
 
 private:
 	static string MakeAPIRequest(ClientContext &context, const string &url, OneLakeCredentials &credentials,

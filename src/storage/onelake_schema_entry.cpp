@@ -130,6 +130,11 @@ optional_ptr<CatalogEntry> OneLakeSchemaEntry::LookupEntry(CatalogTransaction tr
 	}
 	auto &catalog_set = GetCatalogSet(lookup_info.GetCatalogType());
 	auto result = catalog_set.GetEntry(transaction.GetContext(), lookup_info.GetEntryName());
+	if (result && lookup_info.GetCatalogType() == CatalogType::TABLE_ENTRY && transaction.HasContext()) {
+		auto &context = transaction.GetContext();
+		auto &table_entry = result->Cast<OneLakeTableEntry>();
+		table_entry.EnsureColumnDefinitions(context);
+	}
 	if (result || lookup_info.GetCatalogType() != CatalogType::TABLE_ENTRY || !transaction.HasContext()) {
 		return result;
 	}
@@ -140,7 +145,12 @@ optional_ptr<CatalogEntry> OneLakeSchemaEntry::LookupEntry(CatalogTransaction tr
 	}
 	tables.MarkRefreshRequired();
 	tables.EnsureFresh(context);
-	return catalog_set.GetEntry(context, lookup_info.GetEntryName());
+	auto refreshed = catalog_set.GetEntry(context, lookup_info.GetEntryName());
+	if (refreshed && lookup_info.GetCatalogType() == CatalogType::TABLE_ENTRY) {
+		auto &table_entry = refreshed->Cast<OneLakeTableEntry>();
+		table_entry.EnsureColumnDefinitions(context);
+	}
+	return refreshed;
 }
 
 void OneLakeSchemaEntry::EnsureTablesLoaded(ClientContext &context) {

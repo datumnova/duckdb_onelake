@@ -1,6 +1,6 @@
 # name: test/sql/onelake_create_table.test
 # description: Test CREATE TABLE for OneLake extension
-# group: [onelake]
+# group: [sql]
 
 # Require statement will check for OneLake credentials
 require onelake

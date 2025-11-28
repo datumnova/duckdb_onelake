@@ -174,6 +174,19 @@ void OneLakeTableEntry::RememberResolvedPath(const string &path) {
 	resolved_path = path;
 }
 
+bool OneLakeTableEntry::EnsureColumnDefinitions(ClientContext &context) {
+	if (GetColumns().PhysicalColumnCount() > 0) {
+		return true;
+	}
+	unique_ptr<FunctionData> temp_bind_data;
+	auto table_function = GetScanFunction(context, temp_bind_data);
+	(void)table_function;
+	if (GetColumns().PhysicalColumnCount() == 0) {
+		throw CatalogException("OneLake table '%s' did not expose any columns after binding", name);
+	}
+	return true;
+}
+
 void OneLakeTableEntry::UpdateColumnDefinitions(const vector<string> &names, const vector<LogicalType> &types) {
 	ColumnList new_columns;
 	for (idx_t i = 0; i < names.size(); i++) {
@@ -244,7 +257,6 @@ unique_ptr<BaseStatistics> OneLakeTableEntry::GetStatistics(ClientContext &, col
 
 void OneLakeTableEntry::BindUpdateConstraints(Binder &, LogicalGet &, LogicalProjection &, LogicalUpdate &,
                                               ClientContext &) {
-	throw NotImplementedException("OneLake tables do not support UPDATE operations");
 }
 
 TableFunction OneLakeTableEntry::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {

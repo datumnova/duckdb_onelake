@@ -11,6 +11,8 @@ use std::os::raw::c_int;
 use std::slice;
 use std::sync::Arc;
 
+use deltalake::datafusion::prelude::SessionContext;
+use deltalake::datafusion::logical_expr::LogicalPlan;
 use deltalake::arrow::error::ArrowError;
 use deltalake::arrow::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
 use deltalake::arrow::record_batch::RecordBatch;
@@ -577,11 +579,235 @@ fn drop_table_impl(
     Ok(())
 }
 
+/// Delete rows from a Delta table matching a predicate.
+///
+/// # Safety
+///
+/// All pointer arguments must be valid C strings. `error_buffer` must point to a writable
+/// buffer of at least `error_buffer_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn ol_delta_delete(
+    table_uri: *const c_char,
+    predicate: *const c_char,
+    token_json: *const c_char,
+    error_buffer: *mut c_char,
+    error_buffer_len: usize,
+    rows_deleted: *mut u64,
+    files_removed: *mut u64,
+    files_added: *mut u64,
+) -> c_int {
+    let result = (|| -> Result<DeleteMetrics, DeltaFfiError> {
+        let table_uri = read_cstr(table_uri)?;
+        let predicate = read_cstr(predicate)?;
+        let token_json = read_cstr(token_json)?;
+
+        delete_impl(&table_uri, &predicate, &token_json)
+    })();
+
+    match result {
+        Ok(metrics) => {
+            // Write metrics to output parameters
+            if !rows_deleted.is_null() {
+                *rows_deleted = metrics.rows_deleted;
+            }
+            if !files_removed.is_null() {
+                *files_removed = metrics.files_removed;
+            }
+            if !files_added.is_null() {
+                *files_added = metrics.files_added;
+            }
+            OlDeltaStatus::Ok as c_int
+        }
+        Err(err) => {
+            write_error_message(error_buffer, error_buffer_len, &err.message());
+            err.status() as c_int
+        }
+    }
+}
+
+struct DeleteMetrics {
+    rows_deleted: u64,
+    files_removed: u64,
+    files_added: u64,
+}
+
+fn delete_impl(
+    table_uri: &str,
+    predicate: &str,
+    token_json: &str,
+) -> Result<DeleteMetrics, DeltaFfiError> {
+    let table_uri = table_uri.trim();
+    if table_uri.is_empty() {
+        return Err(DeltaFfiError::InvalidInput(
+            "table_uri must not be empty".into(),
+        ));
+    }
+
+    let tokens: TokenPayload = parse_json_or_default(token_json)?;
+    let storage_options = merge_storage_options(HashMap::new(), &tokens);
+
+    ensure_storage_handlers_registered();
+
+    runtime()?.block_on(async move {
+        let ops = if storage_options.is_empty() {
+            DeltaOps::try_from_uri(&table_uri).await?
+        } else {
+            DeltaOps::try_from_uri_with_storage_options(&table_uri, storage_options).await?
+        };
+
+        let delete_builder = ops.delete();
+        
+        // Only add predicate if non-empty (empty means delete all)
+        let delete_builder = if !predicate.is_empty() {
+            delete_builder.with_predicate(predicate)
+        } else {
+            delete_builder
+        };
+
+        let result = delete_builder.await?;
+
+        Ok(DeleteMetrics {
+            rows_deleted: result.1.num_deleted_rows as u64,
+            files_removed: result.1.num_removed_files as u64,
+            files_added: result.1.num_added_files as u64,
+        })
+    })
+}
+
 #[derive(Debug, Default, Deserialize, Clone)]
 #[serde(default, rename_all = "camelCase")]
 struct DropTableOptions {
     /// If true, delete data files; if false, only remove transaction logs
     delete_data: bool,
+}
+
+/// Update rows in a Delta table matching a predicate.
+///
+/// # Safety
+///
+/// All pointer arguments must be valid C strings. `error_buffer` must point to a writable
+/// buffer of at least `error_buffer_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn ol_delta_update(
+    table_uri: *const c_char,
+    predicate: *const c_char,
+    updates_json: *const c_char,
+    token_json: *const c_char,
+    error_buffer: *mut c_char,
+    error_buffer_len: usize,
+    rows_updated: *mut u64,
+    files_removed: *mut u64,
+    files_added: *mut u64,
+) -> c_int {
+    let result = (|| -> Result<UpdateMetrics, DeltaFfiError> {
+        let table_uri = read_cstr(table_uri)?;
+        let predicate = read_cstr(predicate)?;
+        let updates_json = read_cstr(updates_json)?;
+        let token_json = read_cstr(token_json)?;
+
+        update_impl(&table_uri, &predicate, &updates_json, &token_json)
+    })();
+
+    match result {
+        Ok(metrics) => {
+            // Write metrics to output parameters
+            if !rows_updated.is_null() {
+                *rows_updated = metrics.rows_updated;
+            }
+            if !files_removed.is_null() {
+                *files_removed = metrics.files_removed;
+            }
+            if !files_added.is_null() {
+                *files_added = metrics.files_added;
+            }
+            OlDeltaStatus::Ok as c_int
+        }
+        Err(err) => {
+            write_error_message(error_buffer, error_buffer_len, &err.message());
+            err.status() as c_int
+        }
+    }
+}
+
+struct UpdateMetrics {
+    rows_updated: u64,
+    files_removed: u64,
+    files_added: u64,
+}
+
+fn update_impl(
+    table_uri: &str,
+    predicate: &str,
+    updates_json: &str,
+    token_json: &str,
+) -> Result<UpdateMetrics, DeltaFfiError> {
+    let table_uri = table_uri.trim();
+    if table_uri.is_empty() {
+        return Err(DeltaFfiError::InvalidInput(
+            "table_uri must not be empty".into(),
+        ));
+    }
+
+    let tokens: TokenPayload = parse_json_or_default(token_json)?;
+    let updates: HashMap<String, String> = serde_json::from_str(updates_json)?;
+    
+    if updates.is_empty() {
+         return Err(DeltaFfiError::InvalidInput(
+            "updates must not be empty".into(),
+        ));
+    }
+
+    let storage_options = merge_storage_options(HashMap::new(), &tokens);
+
+    ensure_storage_handlers_registered();
+
+    runtime()?.block_on(async move {
+        let ops = if storage_options.is_empty() {
+            DeltaOps::try_from_uri(&table_uri).await?
+        } else {
+            DeltaOps::try_from_uri_with_storage_options(&table_uri, storage_options).await?
+        };
+
+        // Clone table for expression parsing context
+        let table = ops.0.clone();
+        let ctx = SessionContext::new();
+        ctx.register_table("target", Arc::new(table)).map_err(|e| DeltaTableError::Generic(e.to_string()))?;
+
+        let mut update_builder = ops.update();
+        
+        // Only add predicate if non-empty
+        if !predicate.is_empty() {
+            update_builder = update_builder.with_predicate(predicate);
+        }
+        
+        for (col_name, expr_sql) in updates {
+            // Parse expression from SQL string by selecting from the table
+            // This ensures column references are resolved correctly
+            let df = ctx.sql(&format!("SELECT {} FROM target", expr_sql)).await
+                .map_err(|e| DeltaTableError::Generic(format!("Failed to parse expression '{}': {}", expr_sql, e)))?;
+            
+            let plan = df.logical_plan();
+            let expr = match plan {
+                LogicalPlan::Projection(proj) => {
+                    if proj.expr.is_empty() {
+                         return Err(DeltaTableError::Generic(format!("No expression found in '{}'", expr_sql)));
+                    }
+                    proj.expr[0].clone()
+                },
+                _ => return Err(DeltaTableError::Generic(format!("Unexpected plan for expression '{}'", expr_sql))),
+            };
+            
+            update_builder = update_builder.with_update(col_name, expr);
+        }
+
+        let result = update_builder.await?;
+
+        Ok(UpdateMetrics {
+            rows_updated: result.1.num_updated_rows as u64,
+            files_removed: result.1.num_removed_files as u64,
+            files_added: result.1.num_added_files as u64,
+        })
+    }).map_err(DeltaFfiError::from)
 }
 
 #[cfg(test)]

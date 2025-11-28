@@ -59,26 +59,26 @@ string SerializeWriteOptions(const OneLakeDeltaWriteRequest &request) {
 	auto doc = yyjson_mut_doc_new(nullptr);
 	auto *root = yyjson_mut_obj(doc);
 	yyjson_mut_doc_set_root(doc, root);
-	
+
 	// Write mode
 	yyjson_mut_obj_add_str(doc, root, "mode", request.write_mode.c_str());
-	
+
 	// Schema mode
 	if (!request.schema_mode.empty()) {
 		yyjson_mut_obj_add_str(doc, root, "schemaMode", request.schema_mode.c_str());
 	}
-	
+
 	// Replace predicate
 	if (!request.replace_where.empty()) {
 		yyjson_mut_obj_add_str(doc, root, "replaceWhere", request.replace_where.c_str());
 	}
-	
+
 	// Partition columns
 	if (!request.column_names.empty()) {
 		// Extract partition columns from table metadata if available
 		// For now, this is handled separately in BuildWriteRequest
 	}
-	
+
 	// Advanced options
 	if (request.safe_cast) {
 		yyjson_mut_obj_add_bool(doc, root, "safeCast", true);
@@ -89,7 +89,7 @@ string SerializeWriteOptions(const OneLakeDeltaWriteRequest &request) {
 	if (request.write_batch_size > 0) {
 		yyjson_mut_obj_add_uint(doc, root, "writeBatchSize", request.write_batch_size);
 	}
-	
+
 	char *buffer = yyjson_mut_write(doc, 0, nullptr);
 	string result = buffer ? string(buffer) : string();
 	if (buffer) {
@@ -99,25 +99,25 @@ string SerializeWriteOptions(const OneLakeDeltaWriteRequest &request) {
 	return result;
 }
 
-string SerializeWriteOptionsWithPartitions(const OneLakeDeltaWriteRequest &request, 
+string SerializeWriteOptionsWithPartitions(const OneLakeDeltaWriteRequest &request,
                                            const vector<string> &partition_columns) {
 	auto doc = yyjson_mut_doc_new(nullptr);
 	auto *root = yyjson_mut_obj(doc);
 	yyjson_mut_doc_set_root(doc, root);
-	
+
 	// Write mode
 	yyjson_mut_obj_add_str(doc, root, "mode", request.write_mode.c_str());
-	
+
 	// Schema mode
 	if (!request.schema_mode.empty()) {
 		yyjson_mut_obj_add_str(doc, root, "schemaMode", request.schema_mode.c_str());
 	}
-	
+
 	// Replace predicate
 	if (!request.replace_where.empty()) {
 		yyjson_mut_obj_add_str(doc, root, "replaceWhere", request.replace_where.c_str());
 	}
-	
+
 	// Partition columns
 	if (!partition_columns.empty()) {
 		auto *arr = yyjson_mut_arr(doc);
@@ -126,7 +126,7 @@ string SerializeWriteOptionsWithPartitions(const OneLakeDeltaWriteRequest &reque
 		}
 		yyjson_mut_obj_add(root, yyjson_mut_strcpy(doc, "partitionColumns"), arr);
 	}
-	
+
 	// Advanced options
 	if (request.safe_cast) {
 		yyjson_mut_obj_add_bool(doc, root, "safeCast", true);
@@ -137,7 +137,7 @@ string SerializeWriteOptionsWithPartitions(const OneLakeDeltaWriteRequest &reque
 	if (request.write_batch_size > 0) {
 		yyjson_mut_obj_add_uint(doc, root, "writeBatchSize", request.write_batch_size);
 	}
-	
+
 	char *buffer = yyjson_mut_write(doc, 0, nullptr);
 	string result = buffer ? string(buffer) : string();
 	if (buffer) {
@@ -174,48 +174,48 @@ OneLakeDeltaWriteRequest BuildWriteRequest(ClientContext &context, OneLakeCatalo
                                            OneLakeTableEntry &table_entry) {
 	OneLakeDeltaWriteRequest request;
 	request.table_uri = ResolveTableUri(context, catalog, table_entry);
-	request.token_json = SerializeTokenJson(
-	    OneLakeAPI::GetAccessToken(catalog.GetCredentials(), OneLakeTokenAudience::OneLakeDfs));
+	request.token_json =
+	    SerializeTokenJson(OneLakeAPI::GetAccessToken(catalog.GetCredentials(), OneLakeTokenAudience::OneLakeDfs));
 	request.column_names = table_entry.GetColumns().GetColumnNames();
-	
+
 	// Get write mode from settings (default: append)
 	Value mode_value;
 	if (context.TryGetCurrentSetting("onelake_insert_mode", mode_value)) {
 		request.write_mode = StringValue::Get(mode_value);
 	}
-	
+
 	// Get schema mode from settings
 	Value schema_value;
 	if (context.TryGetCurrentSetting("onelake_schema_mode", schema_value)) {
 		request.schema_mode = StringValue::Get(schema_value);
 	}
-	
+
 	// Get safe cast setting
 	Value safe_cast_value;
 	if (context.TryGetCurrentSetting("onelake_safe_cast", safe_cast_value)) {
 		request.safe_cast = BooleanValue::Get(safe_cast_value);
 	}
-	
+
 	// Get target file size
 	Value file_size_value;
 	if (context.TryGetCurrentSetting("onelake_target_file_size", file_size_value)) {
 		request.target_file_size = UBigIntValue::Get(file_size_value);
 	}
-	
+
 	// Get write batch size
 	Value batch_size_value;
 	if (context.TryGetCurrentSetting("onelake_write_batch_size", batch_size_value)) {
 		request.write_batch_size = UBigIntValue::Get(batch_size_value);
 	}
-	
+
 	// Build options JSON with partition columns
 	request.options_json = SerializeWriteOptionsWithPartitions(request, table_entry.GetPartitionColumns());
-	
-	ONELAKE_LOG_WRITE_START(&context, "insert", table_entry.name.c_str(), 
-	                        "mode=%s, schema_mode=%s", request.write_mode.c_str(), 
+
+	ONELAKE_LOG_WRITE_START(&context, "insert", table_entry.name.c_str(), "mode=%s, schema_mode=%s",
+	                        request.write_mode.c_str(),
 	                        request.schema_mode.empty() ? "none" : request.schema_mode.c_str());
 	ONELAKE_LOG_DELTA_URI(&context, table_entry.name.c_str(), request.table_uri.c_str());
-	
+
 	return request;
 }
 
@@ -261,8 +261,8 @@ SinkFinalizeType PhysicalOneLakeInsert::Finalize(Pipeline &, Event &, ClientCont
 		chunk.Flatten();
 		OneLakeDeltaWriter::Append(context, chunk, request);
 	}
-	ONELAKE_LOG_WRITE_SUCCESS(&context, "insert", table_entry.name.c_str(), gstate.insert_count, 
-	                          "chunks=%zu", gstate.collection.ChunkCount());
+	ONELAKE_LOG_WRITE_SUCCESS(&context, "insert", table_entry.name.c_str(), gstate.insert_count, "chunks=%zu",
+	                          gstate.collection.ChunkCount());
 	return SinkFinalizeType::READY;
 }
 

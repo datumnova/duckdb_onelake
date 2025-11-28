@@ -1,6 +1,6 @@
 # name: test/sql/onelake_writes.test
 # description: Test OneLake write operations (INSERT, UPDATE, DELETE, MERGE)
-# group: [onelake-writes]
+# group: [sql]
 
 require onelake
 

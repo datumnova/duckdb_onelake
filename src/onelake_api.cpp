@@ -270,7 +270,7 @@ static string PerformBearerGet(const string &url, const string &token, long time
 }
 
 static long PerformBearerDelete(const string &url, const string &token, string &response_out,
-								long timeout_seconds = 60L) {
+                                long timeout_seconds = 60L) {
 	CURL *curl = curl_easy_init();
 	if (!curl) {
 		throw InternalException("Failed to initialize CURL for OneLake HTTP DELETE request");
@@ -1353,9 +1353,9 @@ vector<string> OneLakeAPI::ListDirectory(ClientContext &context, const string &a
 }
 
 void OneLakeAPI::DropUnityCatalogTable(ClientContext &context, const string &workspace_id,
-									   const OneLakeLakehouse &lakehouse, const string &schema_name,
-									   const string &table_name, OneLakeCredentials &credentials,
-									   bool allow_not_found) {
+                                       const OneLakeLakehouse &lakehouse, const string &schema_name,
+                                       const string &table_name, OneLakeCredentials &credentials,
+                                       bool allow_not_found) {
 	(void)context;
 	if (workspace_id.empty() || lakehouse.id.empty() || table_name.empty()) {
 		return;

@@ -1,6 +1,6 @@
 # name: test/sql/onelake_write_modes.test
 # description: Test OneLake write modes (overwrite, schema evolution, advanced options)
-# group: [onelake-write-modes]
+# group: [sql]
 
 require onelake
 

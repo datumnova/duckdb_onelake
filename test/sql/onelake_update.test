@@ -1,0 +1,67 @@
+# name: test/sql/onelake_update.test
+# description: Test UPDATE operations on OneLake tables
+# group: [sql]
+
+require onelake
+
+# Set up credentials (mock or real)
+# For tests we usually need real credentials or a mock server.
+# Assuming the environment is set up for tests.
+
+statement ok
+SET onelake_allow_destructive_operations = true;
+
+# Create a table
+statement ok
+CREATE TABLE update_test (id INT, name VARCHAR, value INT);
+
+statement ok
+INSERT INTO update_test VALUES (1, 'Alice', 10), (2, 'Bob', 20), (3, 'Charlie', 30);
+
+# Simple update
+statement ok
+UPDATE update_test SET value = 100 WHERE id = 1;
+
+query III
+SELECT * FROM update_test ORDER BY id;
+----
+1	Alice	100
+2	Bob	20
+3	Charlie	30
+
+# Update with expression
+statement ok
+UPDATE update_test SET value = value + 5 WHERE id = 2;
+
+query III
+SELECT * FROM update_test ORDER BY id;
+----
+1	Alice	100
+2	Bob	25
+3	Charlie	30
+
+# Update multiple columns
+statement ok
+UPDATE update_test SET name = 'Dave', value = 40 WHERE id = 3;
+
+query III
+SELECT * FROM update_test ORDER BY id;
+----
+1	Alice	100
+2	Bob	25
+3	Dave	40
+
+# Update with no match
+statement ok
+UPDATE update_test SET value = 0 WHERE id = 99;
+
+query III
+SELECT * FROM update_test ORDER BY id;
+----
+1	Alice	100
+2	Bob	25
+3	Dave	40
+
+# Cleanup
+statement ok
+DROP TABLE update_test;

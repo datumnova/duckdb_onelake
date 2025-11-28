@@ -30,6 +30,9 @@ public:
 	OneLakeCreateTableMetadata *GetCreateMetadata();
 	const OneLakeCreateTableMetadata *GetCreateMetadata() const;
 
+	//! Ensure the table's column definitions have been materialized by binding the underlying table function.
+	bool EnsureColumnDefinitions(ClientContext &context);
+
 	string GetCachedResolvedPath() const;
 	void RememberResolvedPath(const string &path);
 

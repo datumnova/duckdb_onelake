@@ -13,15 +13,22 @@ DISCLAIMER: Currently, this extension is in an experimental phase..
     - Azure service principal credentials (or Fabric Workspace Managed Identity).
     - Credentials from environment variables via a configurable credential chain (`CHAIN 'env'`).
     - Credentials picked up from the Azure CLI logged in user.
-- Connect to OneLake workspaces and lakehouses.
-- Attach multiple lakehouses from the same OneLake workspace.
-- Set a default lakehouse.schema for queries .
-- Query Delta and Iceberg tables stored in OneLake lakehouses with SQL syntax.
-- Append to existing Delta tables via standard DuckDB `INSERT` statements (append-only writes).
+- Connect to OneLake workspaces and lakehouses, including multiple lakehouses per workspace.
+- Set a default `lakehouse.schema` for queries and auto-discover tables lazily.
+- Query both Delta and Iceberg tables stored in OneLake lakehouses with standard SQL (Iceberg remains read-only).
+- Delta write operations with the bundled Rust writer:
+    - `INSERT` pipelines with configurable modes (`append`, `overwrite`, `error_if_exists`, `ignore`).
+    - Physical `CREATE TABLE` statements that materialize Delta metadata and paths.
+    - Guarded `DROP TABLE`, `DELETE`, and `UPDATE` support (no `RETURNING`) with predicate pushdown.
+- Session-level tuning knobs for schema evolution, safe casting, target file size, batch size, and destructive-operation opt-in.
 
 ### Current Limitations
 
-- The Extension only works with normal Lakehouses, schema enabled Lakehouses fail to attach due to the Fabric API limitation [More here](https://learn.microsoft.com/en-us/fabric/data-engineering/lakehouse-schemas#public-preview-limitations)
+- The extension only works with normal lakehouses; schema-enabled lakehouses still fail to attach due to a Fabric API limitation ([details](https://learn.microsoft.com/en-us/fabric/data-engineering/lakehouse-schemas#public-preview-limitations)).
+- Iceberg remains read-only for now; all write paths target Delta tables.
+- `DROP TABLE` currently removes the catalog entry only. It does **not** delete the backing folders or `_delta_log` files inside the OneLake lakehouse, even when those directories are empty.
+- `DELETE` and `UPDATE` do not support `RETURNING` clauses yet.
+- MERGE/UPSERT and ALTER TABLE (add/drop column) are still in development per the roadmap.
 
 ### Detailed Documentation
 For more detailed documentation on the Onelake extension, including architecture, authentication, database attachment, table discovery, Apache Iceberg support, code reference, API integration, and limitations, please refer to the [DOCUMENTATION.md](DOCUMENTATION.md) file.
@@ -174,6 +181,74 @@ When left untouched they continue to default to `FABRIC_API_TOKEN` and `AZURE_ST
 Any insertable DuckDB query works, including `INSERT INTO table SELECT ...` pipelines and parameterized statements. The
 extension batches the input into Arrow streams and hands them to the Rust-based Delta writer, so large inserts benefit
 from DuckDB's vectorized execution without additional configuration.
+
+#### Feature cookbook (all supported writes)
+
+- **Create Delta tables with partitions and properties**
+
+```sql
+CREATE TABLE lakehouse.sales (
+    order_id BIGINT,
+    region VARCHAR,
+    sale_date DATE,
+    amount DECIMAL(18,2)
+) PARTITION BY (region, sale_date)
+WITH (
+    description = 'Daily sales snapshot'
+);
+```
+
+The extension automatically rewrites `PARTITION BY (...)` into the appropriate
+`onelake_partition_columns` session setting, so legacy workflows using
+`SET onelake_partition_columns = 'region,sale_date';` continue to work as well.
+
+- **Append or overwrite data with configurable modes**
+
+```sql
+SET onelake_insert_mode = 'overwrite';
+SET onelake_schema_mode = 'merge'; -- optional schema evolution
+
+INSERT INTO lakehouse.sales (order_id, region, sale_date, amount)
+SELECT order_id, region, sale_date, amount FROM staging.sales_delta;
+```
+
+- **Update rows (requires destructive-operation opt-in)**
+
+```sql
+SET onelake_allow_destructive_operations = true;
+
+UPDATE lakehouse.sales
+SET amount = amount * 1.05
+WHERE region = 'NA' AND sale_date = DATE '2025-11-15';
+```
+
+- **Delete rows by predicate**
+
+```sql
+SET onelake_allow_destructive_operations = true;
+
+DELETE FROM lakehouse.sales
+WHERE sale_date < DATE '2025-01-01';
+```
+
+- **Drop Delta tables safely**
+
+```sql
+SET onelake_allow_destructive_operations = true;
+DROP TABLE IF EXISTS lakehouse.sales_archived;
+```
+
+Each example mirrors the currently supported feature set (CREATE, INSERT, UPDATE, DELETE, DROP). Refer to the write
+settings below to fine-tune performance or safety per session.
+
+#### Write configuration & safety switches
+
+- `SET onelake_insert_mode = 'append|overwrite|error_if_exists|ignore'`
+- `SET onelake_schema_mode = 'merge|overwrite'` to control schema evolution when writing.
+- `SET onelake_safe_cast = true` to allow widening casts during INSERT.
+- `SET onelake_target_file_size = <bytes>` and `SET onelake_write_batch_size = <rows>` for performance tuning.
+- `SET onelake_allow_destructive_operations = true` must be issued before running `DROP TABLE`, `DELETE`, or `UPDATE`.
+    The setting defaults to `false` so destructive operations are opt-in per session.
 
 ## Building
 ### Managing dependencies

@@ -2,7 +2,25 @@
 
 ## Supported Syntax
 
-The OneLake extension supports creating partitioned Delta tables using a session variable:
+The OneLake extension now accepts native `PARTITION BY` clauses in `CREATE TABLE` statements and automatically
+translates them into the underlying `onelake_partition_columns` session setting.
+
+```sql
+CREATE TABLE sales (
+    id INTEGER,
+    region VARCHAR,
+    category VARCHAR,
+    date DATE,
+    amount DOUBLE
+) PARTITION BY (category, region);
+```
+
+Behind the scenes the extension scopes `SET onelake_partition_columns = 'category,region';` just for the duration of the
+statement, ensuring the Delta writer receives the same partition metadata without any manual steps.
+
+## Manual Session Setting (Optional)
+
+If you prefer the previous workflow, you can still set the session variable directly:
 
 ```sql
 SET onelake_partition_columns = 'category,region';
@@ -13,83 +31,39 @@ CREATE TABLE sales (
     date DATE,
     amount DOUBLE
 );
--- Partition setting is automatically consumed during CREATE TABLE
+SET onelake_partition_columns = NULL; -- optional cleanup
 ```
 
-## Why Not PARTITION BY?
-
-The standard SQL `PARTITION BY` clause in CREATE TABLE is **not natively supported** due to DuckDB's parser architecture. When you attempt to use it:
-
-```sql
-CREATE TABLE sales (...) PARTITION BY (category, region);
-```
-
-You'll receive a helpful error message with the correct syntax to use.
-
-## Workaround for PARTITION BY Syntax
-
-If you prefer to write queries with `PARTITION BY` syntax, you can:
-
-### Option 1: Manual Preprocessing
-Copy the suggested syntax from the error message:
-```sql
--- Original (will error):
--- CREATE TABLE test (...) PARTITION BY (col1, col2);
-
--- Use instead:
-SET onelake_partition_columns = 'col1,col2';
-CREATE TABLE test (...);
-```
-
-### Option 2: Python Preprocessor
-Use the provided script to automatically transform your SQL:
-
-```bash
-python scripts/preprocess_sql.py your_query.sql | duckdb
-```
-
-The script transforms:
-```sql
-CREATE TABLE test (id INT, category VARCHAR) PARTITION BY (category);
-```
-
-Into:
-```sql
-SET onelake_partition_columns = 'category';
-CREATE TABLE test (id INT, category VARCHAR);
-SET onelake_partition_columns = NULL;
-```
+Both syntaxes feed into the same code path when the OneLake extension calls the Delta writer.
 
 ## How It Works
 
-1. Set the `onelake_partition_columns` variable before CREATE TABLE
-2. The extension reads this variable during table creation
-3. Partition columns are passed to the Delta Lake writer
-4. Tables are created with Hive-style partitioning
-5. The setting is automatically cleared after use
+1. The parser extension intercepts `CREATE TABLE ... PARTITION BY (...)` statements.
+2. It extracts the partition column list and rewrites the command internally.
+3. `onelake_partition_columns` is set for the duration of the CREATE TABLE call.
+4. The rewrite is transparent to users and preserves existing transaction semantics.
 
 ## Examples
 
 ### Single Partition Column
 ```sql
-SET onelake_partition_columns = 'region';
 CREATE TABLE users (
     id INTEGER,
     name VARCHAR,
     region VARCHAR
-);
+) PARTITION BY (region);
 ```
 
-### Multiple Partition Columns
+### Multiple Partition Columns with Tags
 ```sql
-SET onelake_partition_columns = 'region,date';
 CREATE TABLE events (
     id INTEGER,
     event_type VARCHAR,
     region VARCHAR,
     date DATE,
     value DOUBLE
-);
+) PARTITION BY (region, date)
+WITH (description = 'Event stream for dashboards');
 ```
 
 ### Verify Partitioning
@@ -109,7 +83,6 @@ Tables/
 
 ## Limitations
 
-- Partition columns must exist in the table schema
-- Setting applies only to the next CREATE TABLE statement
-- Static builds don't include the helpful PARTITION BY error message
-- External query preprocessing required for true PARTITION BY syntax support
+- Partition columns must exist in the table schema.
+- The clause applies to the immediately following `CREATE TABLE` statement.
+- Static builds without the parser extension fallback still require the manual session variable approach.

@@ -44,6 +44,8 @@ set(EXTENSION_SOURCES_COMMON
     src/storage/onelake_table_entry.cpp
     src/storage/onelake_path_util.cpp
     src/storage/onelake_insert.cpp
+    src/storage/onelake_delete.cpp
+    src/storage/onelake_update.cpp
     src/storage/onelake_transaction_manager.cpp
     src/storage/onelake_transaction.cpp
 )

@@ -549,20 +549,21 @@ CREATE TABLE sales (
     amount DECIMAL(18,2)
 );
 
--- Partitioned table (use SET variable approach)
-SET onelake_partition_columns = 'region,date';
+-- Partitioned table (PARTITION BY gets rewritten automatically)
 CREATE TABLE sales_partitioned (
     id INTEGER,
     region VARCHAR,
     date DATE,
     amount DOUBLE
-) COMMENT 'Regional sales by date';
+) PARTITION BY (region, date)
+COMMENT 'Regional sales by date';
 
 -- With IF NOT EXISTS
 CREATE TABLE IF NOT EXISTS sales (id INTEGER);
 ```
 
-**Note:** For partitioning details and PARTITION BY syntax limitations, see [PARTITION_SYNTAX.md](../PARTITION_SYNTAX.md).
+**Note:** For partitioning details (including the transparent `PARTITION BY` rewrite), see
+[PARTITION_SYNTAX.md](../PARTITION_SYNTAX.md).
 
 ---
 
