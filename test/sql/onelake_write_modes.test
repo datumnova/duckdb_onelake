@@ -1,0 +1,403 @@
+# name: test/sql/onelake_write_modes.test
+# description: Test OneLake write modes (overwrite, schema evolution, advanced options)
+# group: [sql]
+
+require onelake
+
+# Note: These tests require a live OneLake connection with appropriate credentials
+# Set environment variables: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET
+# Set test environment: TEST_WORKSPACE, TEST_LAKEHOUSE
+
+# Skip tests if environment not configured
+mode skip
+
+statement ok
+INSTALL azure;
+
+statement ok
+LOAD azure;
+
+# Setup authentication
+statement ok
+CREATE SECRET azure_modes_test (
+    TYPE azure,
+    PROVIDER service_principal,
+    TENANT_ID '${AZURE_TENANT_ID}',
+    CLIENT_ID '${AZURE_CLIENT_ID}',
+    CLIENT_SECRET '${AZURE_CLIENT_SECRET}'
+);
+
+statement ok
+CREATE SECRET onelake_modes_test (
+    TYPE ONELAKE,
+    TENANT_ID '${AZURE_TENANT_ID}',
+    CLIENT_ID '${AZURE_CLIENT_ID}',
+    CLIENT_SECRET '${AZURE_CLIENT_SECRET}'
+);
+
+# Attach test lakehouse
+statement ok
+ATTACH '${TEST_WORKSPACE}/${TEST_LAKEHOUSE}.Lakehouse' 
+    AS modes_db (TYPE ONELAKE);
+
+# ============================================================================
+# Test 1: Default INSERT mode (append)
+# ============================================================================
+
+statement ok
+CREATE TABLE IF NOT EXISTS modes_db.test_schema.append_test (
+    id INT,
+    value VARCHAR,
+    timestamp TIMESTAMP
+);
+
+# First insert
+statement ok
+INSERT INTO modes_db.test_schema.append_test 
+VALUES (1, 'first', '2025-01-01 10:00:00');
+
+# Second insert should append
+statement ok
+INSERT INTO modes_db.test_schema.append_test 
+VALUES (2, 'second', '2025-01-01 11:00:00');
+
+query I
+SELECT COUNT(*) FROM modes_db.test_schema.append_test;
+----
+2
+
+# ============================================================================
+# Test 2: Explicit APPEND mode
+# ============================================================================
+
+statement ok
+SET onelake_insert_mode = 'append';
+
+statement ok
+INSERT INTO modes_db.test_schema.append_test 
+VALUES (3, 'third', '2025-01-01 12:00:00');
+
+query I
+SELECT COUNT(*) FROM modes_db.test_schema.append_test;
+----
+3
+
+# ============================================================================
+# Test 3: OVERWRITE mode
+# ============================================================================
+
+statement ok
+CREATE TABLE IF NOT EXISTS modes_db.test_schema.overwrite_test (
+    id INT,
+    category VARCHAR,
+    amount DECIMAL(10,2)
+);
+
+# Initial data
+statement ok
+SET onelake_insert_mode = 'append';
+
+statement ok
+INSERT INTO modes_db.test_schema.overwrite_test 
+VALUES (1, 'A', 100.00), (2, 'B', 200.00), (3, 'C', 300.00);
+
+query I
+SELECT COUNT(*) FROM modes_db.test_schema.overwrite_test;
+----
+3
+
+# Switch to overwrite mode
+statement ok
+SET onelake_insert_mode = 'overwrite';
+
+statement ok
+INSERT INTO modes_db.test_schema.overwrite_test 
+VALUES (10, 'X', 1000.00);
+
+# Should only have the new row
+query IVR
+SELECT * FROM modes_db.test_schema.overwrite_test ORDER BY id;
+----
+10	X	1000.00
+
+# ============================================================================
+# Test 4: ERROR_IF_EXISTS mode
+# ============================================================================
+
+statement ok
+CREATE TABLE IF NOT EXISTS modes_db.test_schema.error_if_exists_test (
+    id INT,
+    name VARCHAR
+);
+
+# First insert with error_if_exists should succeed (table is empty)
+statement ok
+SET onelake_insert_mode = 'error_if_exists';
+
+statement ok
+INSERT INTO modes_db.test_schema.error_if_exists_test 
+VALUES (1, 'Alice');
+
+# Second insert with error_if_exists should fail
+statement error
+INSERT INTO modes_db.test_schema.error_if_exists_test 
+VALUES (2, 'Bob');
+
+# ============================================================================
+# Test 5: IGNORE mode
+# ============================================================================
+
+statement ok
+CREATE TABLE IF NOT EXISTS modes_db.test_schema.ignore_test (
+    id INT,
+    data VARCHAR
+);
+
+# First insert
+statement ok
+SET onelake_insert_mode = 'ignore';
+
+statement ok
+INSERT INTO modes_db.test_schema.ignore_test 
+VALUES (1, 'data1');
+
+# Second insert with ignore mode - should silently do nothing if table exists
+statement ok
+INSERT INTO modes_db.test_schema.ignore_test 
+VALUES (2, 'data2');
+
+# ============================================================================
+# Test 6: Schema Evolution - MERGE mode
+# ============================================================================
+
+statement ok
+CREATE TABLE IF NOT EXISTS modes_db.test_schema.schema_merge_test (
+    id INT,
+    name VARCHAR
+);
+
+# Initial insert
+statement ok
+SET onelake_insert_mode = 'append';
+
+statement ok
+SET onelake_schema_mode = '';
+
+statement ok
+INSERT INTO modes_db.test_schema.schema_merge_test 
+VALUES (1, 'Alice');
+
+# Insert with new column using schema merge
+statement ok
+SET onelake_schema_mode = 'merge';
+
+statement ok
+INSERT INTO modes_db.test_schema.schema_merge_test (id, name, age)
+VALUES (2, 'Bob', 30);
+
+# Verify new column was added
+query I
+SELECT COUNT(*) FROM information_schema.columns 
+WHERE table_name = 'schema_merge_test';
+----
+3
+
+# ============================================================================
+# Test 7: Schema Evolution - OVERWRITE mode
+# ============================================================================
+
+statement ok
+CREATE TABLE IF NOT EXISTS modes_db.test_schema.schema_overwrite_test (
+    id INT,
+    old_column VARCHAR
+);
+
+statement ok
+SET onelake_insert_mode = 'overwrite';
+
+statement ok
+INSERT INTO modes_db.test_schema.schema_overwrite_test 
+VALUES (1, 'old_value');
+
+# Overwrite schema with new structure
+statement ok
+SET onelake_schema_mode = 'overwrite';
+
+statement ok
+INSERT INTO modes_db.test_schema.schema_overwrite_test (id, new_column)
+VALUES (2, 'new_value');
+
+# Verify schema was replaced
+query I
+SELECT COUNT(*) FROM information_schema.columns 
+WHERE table_name = 'schema_overwrite_test' AND column_name = 'new_column';
+----
+1
+
+# ============================================================================
+# Test 8: Safe Cast Option
+# ============================================================================
+
+statement ok
+CREATE TABLE IF NOT EXISTS modes_db.test_schema.safe_cast_test (
+    id INT,
+    numeric_value BIGINT
+);
+
+statement ok
+SET onelake_insert_mode = 'append';
+
+statement ok
+SET onelake_safe_cast = true;
+
+# This should succeed with safe casting
+statement ok
+INSERT INTO modes_db.test_schema.safe_cast_test 
+VALUES (1, 12345678901234567890);  -- Might require casting/truncation
+
+query I
+SELECT COUNT(*) FROM modes_db.test_schema.safe_cast_test;
+----
+1
+
+# ============================================================================
+# Test 9: Target File Size Option
+# ============================================================================
+
+statement ok
+SET onelake_target_file_size = 134217728;  -- 128 MB
+
+statement ok
+CREATE TABLE IF NOT EXISTS modes_db.test_schema.file_size_test (
+    id INT,
+    payload VARCHAR
+);
+
+# Insert with specific file size target
+statement ok
+INSERT INTO modes_db.test_schema.file_size_test 
+SELECT i, 'data_' || i 
+FROM range(1, 1001) t(i);
+
+query I
+SELECT COUNT(*) FROM modes_db.test_schema.file_size_test;
+----
+1000
+
+# ============================================================================
+# Test 10: Write Batch Size Option
+# ============================================================================
+
+statement ok
+SET onelake_write_batch_size = 100;
+
+statement ok
+CREATE TABLE IF NOT EXISTS modes_db.test_schema.batch_size_test (
+    id INT,
+    batch_data VARCHAR
+);
+
+# Insert with specific batch size
+statement ok
+INSERT INTO modes_db.test_schema.batch_size_test 
+SELECT i, 'batch_' || i 
+FROM range(1, 501) t(i);
+
+query I
+SELECT COUNT(*) FROM modes_db.test_schema.batch_size_test;
+----
+500
+
+# ============================================================================
+# Test 11: Multiple Settings Combined
+# ============================================================================
+
+statement ok
+SET onelake_insert_mode = 'append';
+
+statement ok
+SET onelake_schema_mode = 'merge';
+
+statement ok
+SET onelake_safe_cast = true;
+
+statement ok
+SET onelake_target_file_size = 67108864;  -- 64 MB
+
+statement ok
+SET onelake_write_batch_size = 500;
+
+statement ok
+CREATE TABLE IF NOT EXISTS modes_db.test_schema.combined_options_test (
+    id INT,
+    description VARCHAR,
+    value DECIMAL(15,2)
+);
+
+statement ok
+INSERT INTO modes_db.test_schema.combined_options_test 
+SELECT 
+    i,
+    'desc_' || i,
+    i * 10.5
+FROM range(1, 101) t(i);
+
+query I
+SELECT COUNT(*) FROM modes_db.test_schema.combined_options_test;
+----
+100
+
+# ============================================================================
+# Test 12: Reset Settings to Defaults
+# ============================================================================
+
+statement ok
+RESET onelake_insert_mode;
+
+statement ok
+RESET onelake_schema_mode;
+
+statement ok
+RESET onelake_safe_cast;
+
+statement ok
+RESET onelake_target_file_size;
+
+statement ok
+RESET onelake_write_batch_size;
+
+# Verify defaults restored
+query T
+SELECT current_setting('onelake_insert_mode');
+----
+append
+
+query T
+SELECT current_setting('onelake_schema_mode');
+----
+(empty string)
+
+query T
+SELECT current_setting('onelake_safe_cast');
+----
+false
+
+# ============================================================================
+# Test 13: Session-specific Settings
+# ============================================================================
+
+# Settings should not affect other sessions
+statement ok
+SET onelake_insert_mode = 'overwrite';
+
+# In a new context, this would be 'append' again
+# (Cannot test multi-session in SQLLogicTest, but documenting expected behavior)
+
+# ============================================================================
+# Cleanup Notes
+# ============================================================================
+
+# Note: Cleanup requires DROP TABLE support (Phase 3)
+# Manual cleanup may be required via Fabric portal
+
+mode unskip

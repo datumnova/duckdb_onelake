@@ -269,6 +269,38 @@ static string PerformBearerGet(const string &url, const string &token, long time
 	return response_string;
 }
 
+static long PerformBearerDelete(const string &url, const string &token, string &response_out,
+                                long timeout_seconds = 60L) {
+	CURL *curl = curl_easy_init();
+	if (!curl) {
+		throw InternalException("Failed to initialize CURL for OneLake HTTP DELETE request");
+	}
+	response_out.clear();
+	curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_out);
+	curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);
+	curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
+
+	struct curl_slist *headers = nullptr;
+	string auth_header = "Authorization: Bearer " + token;
+	headers = curl_slist_append(headers, auth_header.c_str());
+	headers = curl_slist_append(headers, "Accept: application/json");
+	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+	CURLcode res = curl_easy_perform(curl);
+	long response_code = 0;
+	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+
+	curl_slist_free_all(headers);
+	curl_easy_cleanup(curl);
+
+	if (res != CURLE_OK) {
+		throw IOException("OneLake HTTP DELETE failed: %s", curl_easy_strerror(res));
+	}
+	return response_code;
+}
+
 static string ResolveIcebergCatalogPrefix(const string &workspace_id, const OneLakeLakehouse &lakehouse,
                                           OneLakeCredentials &credentials) {
 	string warehouse = BuildWarehouseScope(workspace_id, lakehouse);
@@ -1318,6 +1350,36 @@ vector<string> OneLakeAPI::ListDirectory(ClientContext &context, const string &a
 	}
 
 	return directories;
+}
+
+void OneLakeAPI::DropUnityCatalogTable(ClientContext &context, const string &workspace_id,
+                                       const OneLakeLakehouse &lakehouse, const string &schema_name,
+                                       const string &table_name, OneLakeCredentials &credentials,
+                                       bool allow_not_found) {
+	(void)context;
+	if (workspace_id.empty() || lakehouse.id.empty() || table_name.empty()) {
+		return;
+	}
+	auto base = BuildUnityCatalogBase(workspace_id, lakehouse.id);
+	if (base.empty()) {
+		return;
+	}
+	auto identifier = FormatUnityCatalogIdentifier(schema_name, table_name);
+	string url = base + "/tables/" + UrlEncodeComponent(identifier);
+	string catalog_name = NormalizeCatalogName(lakehouse.name);
+	if (!catalog_name.empty()) {
+		url += "?catalog_name=" + UrlEncodeComponent(catalog_name);
+	}
+	// Unity Catalog API uses DFS scope
+	string token = OneLakeAPI::GetAccessToken(credentials, OneLakeTokenAudience::OneLakeDfs);
+	string body;
+	long code = PerformBearerDelete(url, token, body, 60L);
+	if (code == 404 && allow_not_found) {
+		return;
+	}
+	if (code < 200 || code >= 300) {
+		throw IOException("Unity Catalog drop table failed: HTTP %ld - %s", code, body.c_str());
+	}
 }
 
 } // namespace duckdb

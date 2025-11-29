@@ -1,13 +1,19 @@
 #include "onelake_api.hpp"
+#include "onelake_delta_writer.hpp"
+#include "onelake_logging.hpp"
 #include "storage/onelake_catalog.hpp"
 #include "storage/onelake_http_util.hpp"
 #include "storage/onelake_table_set.hpp"
 #include "duckdb/catalog/dependency_list.hpp"
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/helper.hpp"
+#include "duckdb/common/insertion_order_preserving_map.hpp"
 #include "duckdb/common/printer.hpp"
-#include "duckdb/common/vector.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/vector.hpp"
+#include "duckdb/common/types/value.hpp"
+#include <algorithm>
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/parser/constraints/list.hpp"
@@ -15,21 +21,28 @@
 #include "duckdb/parser/constraints/unique_constraint.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
+#include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "duckdb/common/constants.hpp"
 #include "storage/onelake_schema_entry.hpp"
 #include "duckdb/main/client_context.hpp"
 #include <unordered_set>
+#include <memory>
 
 namespace {
 
 using duckdb::ClientContext;
 using duckdb::CreateTableInfo;
+using duckdb::DefaultLogType;
 using duckdb::EnsureHttpBearerSecret;
 using duckdb::Exception;
 using duckdb::ExtensionHelper;
+using duckdb::FunctionData;
 using duckdb::idx_t;
+using duckdb::InsertionOrderPreservingMap;
+using duckdb::Logger;
+using duckdb::LogLevel;
 using duckdb::make_uniq;
 using duckdb::OneLakeAPI;
 using duckdb::OneLakeCatalog;
@@ -39,8 +52,105 @@ using duckdb::OneLakeTableSet;
 using duckdb::Printer;
 using duckdb::string;
 using duckdb::StringUtil;
+using duckdb::unique_ptr;
+using duckdb::unique_ptr_cast;
 using duckdb::vector;
 using std::unordered_set;
+
+string GetTagValue(const InsertionOrderPreservingMap<string> &tags, const string &key) {
+	auto entry = tags.find(key);
+	if (entry == tags.end()) {
+		return string();
+	}
+	return entry->second;
+}
+
+vector<string> ParseListValue(const string &value) {
+	vector<string> result;
+	auto entries = StringUtil::Split(value, ',');
+	for (auto &entry : entries) {
+		auto trimmed = entry;
+		StringUtil::Trim(trimmed);
+		if (trimmed.empty()) {
+			continue;
+		}
+		if (std::find(result.begin(), result.end(), trimmed) != result.end()) {
+			continue;
+		}
+		result.push_back(trimmed);
+	}
+	return result;
+}
+
+vector<string> ExtractPartitionColumns(ClientContext &context, const CreateTableInfo &create_info) {
+	vector<string> partitions;
+
+	// First check session variable onelake_partition_columns
+	duckdb::Value partition_val;
+	if (context.TryGetCurrentSetting("onelake_partition_columns", partition_val)) {
+		if (!partition_val.IsNull()) {
+			string partition_str = partition_val.ToString();
+			auto parts = StringUtil::Split(partition_str, ',');
+			for (auto &part : parts) {
+				StringUtil::Trim(part);
+				if (!part.empty()) {
+					partitions.push_back(part);
+				}
+			}
+			if (!partitions.empty()) {
+				return partitions;
+			}
+		}
+	}
+
+	// Check for ONELAKE_PARTITIONS in comment
+	if (!create_info.comment.IsNull()) {
+		string comment = create_info.comment.ToString();
+		auto pos = comment.find("ONELAKE_PARTITIONS=");
+		if (pos != string::npos) {
+			pos += 19; // strlen("ONELAKE_PARTITIONS=")
+			string partition_str;
+			while (pos < comment.size() && comment[pos] != ' ' && comment[pos] != ']') {
+				partition_str += comment[pos];
+				pos++;
+			}
+			auto parts = StringUtil::Split(partition_str, ',');
+			for (auto &part : parts) {
+				StringUtil::Trim(part);
+				if (!part.empty()) {
+					partitions.push_back(part);
+				}
+			}
+			if (!partitions.empty()) {
+				return partitions;
+			}
+		}
+	}
+
+	// Fallback to tags (for compatibility)
+	static const vector<string> candidate_keys = {"partition_columns", "partition_by", "onelake_partition_columns"};
+	for (const auto &key : candidate_keys) {
+		auto raw = GetTagValue(create_info.tags, key);
+		if (raw.empty()) {
+			continue;
+		}
+		auto parsed = ParseListValue(raw);
+		partitions.insert(partitions.end(), parsed.begin(), parsed.end());
+	}
+	return partitions;
+}
+
+string ExtractExplicitLocation(const CreateTableInfo &create_info) {
+	static const vector<string> location_keys = {"location", "path", "onelake_location"};
+	for (const auto &key : location_keys) {
+		auto value = GetTagValue(create_info.tags, key);
+		StringUtil::Trim(value);
+		if (!value.empty()) {
+			return value;
+		}
+	}
+	return string();
+}
 
 string EnsureTrailingSlash(const string &path) {
 	if (path.empty()) {
@@ -85,8 +195,9 @@ vector<string> BuildTableRootCandidates(const OneLakeCatalog &catalog, const One
 	return result;
 }
 
-void AddDiscoveredTable(OneLakeCatalog &catalog, OneLakeSchemaEntry &schema, OneLakeTableSet &table_set,
-                        const string &table_name, const string &format, const string &relative_location) {
+void AddDiscoveredTable(ClientContext &context, OneLakeCatalog &catalog, OneLakeSchemaEntry &schema,
+                        OneLakeTableSet &table_set, const string &table_name, const string &format,
+                        const string &relative_location) {
 	CreateTableInfo info;
 	info.table = table_name;
 	auto table_entry = make_uniq<OneLakeTableEntry>(catalog, schema, info);
@@ -177,7 +288,7 @@ idx_t DiscoverTablesFromStorage(ClientContext &context, OneLakeCatalog &catalog,
 			} else {
 				relative_location = "Tables/" + leaf;
 			}
-			AddDiscoveredTable(catalog, schema, table_set, leaf, detected_format, relative_location);
+			AddDiscoveredTable(context, catalog, schema, table_set, leaf, detected_format, relative_location);
 			discovered++;
 			// Printer::Print(
 			//     StringUtil::Format("[onelake] registered storage table '%s' from '%s/%s'", leaf, root, leaf));
@@ -372,7 +483,115 @@ unique_ptr<OneLakeTableInfo> OneLakeTableSet::GetTableInfo(ClientContext &contex
 }
 
 optional_ptr<CatalogEntry> OneLakeTableSet::CreateTable(ClientContext &context, BoundCreateTableInfo &info) {
-	throw NotImplementedException("OneLake table creation not supported - tables are managed through Fabric");
+	auto &base_info = info.Base();
+	if (base_info.temporary) {
+		throw BinderException("TEMPORARY tables are not supported in OneLake catalogs");
+	}
+	EnsureFresh(context);
+	auto existing_entry = GetEntry(context, base_info.table);
+	if (existing_entry) {
+		switch (base_info.on_conflict) {
+		case OnCreateConflict::IGNORE_ON_CONFLICT:
+			return existing_entry;
+		case OnCreateConflict::REPLACE_ON_CONFLICT:
+			throw NotImplementedException("CREATE OR REPLACE TABLE is not supported in OneLake catalogs yet");
+		default:
+			throw BinderException("Table with name \"%s\" already exists in OneLake schema \"%s\"", base_info.table,
+			                      schema.name);
+		}
+	}
+
+	// Extract partition columns and custom location before creating table entry
+	ONELAKE_LOG_INFO(&context, "[create_table] Table tags count: %zu", base_info.tags.size());
+	for (const auto &tag : base_info.tags) {
+		ONELAKE_LOG_INFO(&context, "[create_table] Tag: %s = %s", tag.first.c_str(), tag.second.c_str());
+	}
+
+	auto partition_columns = ExtractPartitionColumns(context, base_info);
+	auto custom_location = ExtractExplicitLocation(base_info);
+
+	ONELAKE_LOG_INFO(&context, "[create_table] Partition columns extracted: %zu columns", partition_columns.size());
+	for (const auto &col : partition_columns) {
+		ONELAKE_LOG_INFO(&context, "[create_table]   - %s", col.c_str());
+	}
+
+	// Build table URI for physical creation
+	auto &schema_entry = schema.Cast<OneLakeSchemaEntry>();
+	auto &onelake_catalog = catalog.Cast<OneLakeCatalog>();
+	string table_uri;
+	if (!custom_location.empty()) {
+		table_uri = custom_location;
+	} else {
+		// Build default URI: abfss://workspace_id@onelake.dfs.fabric.microsoft.com/lakehouse_id/Tables/table_name/
+		string workspace_id = onelake_catalog.GetWorkspaceId();
+		if (!schema_entry.schema_data || schema_entry.schema_data->id.empty()) {
+			throw InternalException("Schema entry missing lakehouse data for table creation");
+		}
+		string lakehouse_id = schema_entry.schema_data->id;
+		table_uri = "abfss://" + workspace_id + "@onelake.dfs.fabric.microsoft.com/" + lakehouse_id + "/Tables/" +
+		            base_info.table + "/";
+	}
+
+	// Serialize write options with partition columns
+	string options_json = "{\"partitionColumns\":[";
+	for (idx_t i = 0; i < partition_columns.size(); i++) {
+		if (i > 0)
+			options_json += ",";
+		options_json += "\"" + partition_columns[i] + "\"";
+	}
+	options_json += "],\"tableName\":\"" + base_info.table + "\"";
+	if (!base_info.comment.IsNull()) {
+		options_json += ",\"description\":\"" + StringValue::Get(base_info.comment) + "\"";
+	}
+	options_json += "}";
+
+	ONELAKE_LOG_INFO(&context, "[create_table] Options JSON: %s", options_json.c_str());
+
+	// Get access token
+	string token_json = "{\"storageToken\":\"" +
+	                    OneLakeAPI::GetAccessToken(onelake_catalog.GetCredentials(), OneLakeTokenAudience::OneLakeDfs) +
+	                    "\"}";
+
+	// Convert columns to vector for CreateTable
+	vector<ColumnDefinition> columns_vec;
+	for (auto &col : base_info.columns.Physical()) {
+		columns_vec.push_back(col.Copy());
+	}
+
+	// Create physical Delta table in OneLake storage
+	ONELAKE_LOG_INFO(&context, "[create_table] Creating Delta table: %s", table_uri.c_str());
+	try {
+		OneLakeDeltaWriter::CreateTable(context, table_uri, columns_vec, token_json, options_json);
+		ONELAKE_LOG_INFO(&context, "[create_table] Successfully created table: %s", base_info.table.c_str());
+	} catch (std::exception &ex) {
+		ONELAKE_LOG_ERROR(&context, "[create_table] Failed to create table %s: %s", base_info.table.c_str(), ex.what());
+		throw;
+	}
+
+	// Create catalog entry
+	auto table_entry = make_uniq<OneLakeTableEntry>(catalog, schema, base_info);
+	if (!partition_columns.empty()) {
+		table_entry->SetPartitionColumns(partition_columns);
+	}
+	if (table_entry->table_data) {
+		table_entry->table_data->type = "Table";
+		if (table_entry->table_data->format.empty()) {
+			table_entry->table_data->format = "Delta";
+		}
+		if (!custom_location.empty()) {
+			table_entry->table_data->location = custom_location;
+		} else {
+			table_entry->table_data->location = table_uri;
+		}
+	}
+	auto metadata = make_uniq<OneLakeCreateTableMetadata>();
+	metadata->create_info = unique_ptr_cast<CreateInfo, CreateTableInfo>(base_info.Copy());
+	metadata->partition_columns = partition_columns;
+	metadata->table_properties = metadata->create_info->tags;
+	metadata->is_ctas = info.query.get() != nullptr;
+	table_entry->SetCreateMetadata(std::move(metadata));
+	auto result = CreateEntry(std::move(table_entry));
+	return result;
 }
 
 void OneLakeTableSet::AlterTable(ClientContext &context, RenameTableInfo &info) {
@@ -408,6 +627,90 @@ void OneLakeTableSet::AlterTable(ClientContext &context, AlterTableInfo &alter) 
 	default:
 		throw NotImplementedException("OneLake alter table operation not supported");
 	}
+}
+
+void OneLakeTableSet::DropEntry(ClientContext &context, DropInfo &info) {
+	if (info.type != CatalogType::TABLE_ENTRY) {
+		throw NotImplementedException("Only DROP TABLE is supported for OneLake tables");
+	}
+
+	// CRITICAL: Check permission FIRST, before EnsureFresh or any API calls
+	bool allow_destructive = false;
+	Value setting_value;
+	if (context.TryGetCurrentSetting("onelake_allow_destructive_operations", setting_value)) {
+		allow_destructive = BooleanValue::Get(setting_value);
+	}
+	if (!allow_destructive) {
+		throw PermissionException(
+		    "DROP TABLE is disabled. Set 'onelake_allow_destructive_operations = true' to enable.");
+	}
+
+	// Permission granted - now proceed with normal DROP logic
+	EnsureFresh(context);
+	auto existing_entry = GetEntry(context, info.name);
+	if (!existing_entry) {
+		if (info.if_not_found == OnEntryNotFound::RETURN_NULL) {
+			return;
+		}
+		throw BinderException("Table '%s' not found in OneLake schema '%s'", info.name, schema.name);
+	}
+
+	auto &table_entry = existing_entry->Cast<OneLakeTableEntry>();
+	auto &onelake_catalog = catalog.Cast<OneLakeCatalog>();
+	auto &schema_entry = schema.Cast<OneLakeSchemaEntry>();
+
+	// Build table URI
+	string workspace_id = onelake_catalog.GetWorkspaceId();
+	if (!schema_entry.schema_data || schema_entry.schema_data->id.empty()) {
+		throw InternalException("Schema entry missing lakehouse data for table drop");
+	}
+	string lakehouse_id = schema_entry.schema_data->id;
+	string table_uri =
+	    "abfss://" + workspace_id + "@onelake.dfs.fabric.microsoft.com/" + lakehouse_id + "/Tables/" + info.name + "/";
+
+	// Build token/options and drop from storage
+	string token_json = "{\"storageToken\":\"" +
+	                    OneLakeAPI::GetAccessToken(onelake_catalog.GetCredentials(), OneLakeTokenAudience::OneLakeDfs) +
+	                    "\"}";
+	string options_json = "{\"deleteData\":true}";
+
+	// --- Performance profiling: log timing for storage delete ---
+	auto t_start_storage = std::chrono::high_resolution_clock::now();
+	ONELAKE_LOG_INFO(&context, "[drop_table] Dropping table: %s", info.name.c_str());
+	try {
+		OneLakeDeltaWriter::DropTable(context, table_uri, token_json, options_json);
+	} catch (std::exception &ex) {
+		ONELAKE_LOG_ERROR(&context, "[drop_table] Failed to drop table %s storage: %s", info.name.c_str(), ex.what());
+		throw;
+	}
+	auto t_end_storage = std::chrono::high_resolution_clock::now();
+	double storage_secs = std::chrono::duration<double>(t_end_storage - t_start_storage).count();
+	ONELAKE_LOG_INFO(&context, "[drop_table] Storage delete time: %.3fs", storage_secs);
+
+	// --- Performance profiling: log timing for catalog delete ---
+	auto t_start_catalog = std::chrono::high_resolution_clock::now();
+	try {
+		const auto &lakehouse = *schema_entry.schema_data;
+		// Prefer explicit schema if schema-enabled; otherwise, attempt default schema if present
+		string uc_schema = lakehouse.schema_enabled ? schema.name : lakehouse.default_schema;
+		OneLakeAPI::DropUnityCatalogTable(context, workspace_id, lakehouse, uc_schema, info.name,
+		                                  onelake_catalog.GetCredentials(), /*allow_not_found=*/true);
+		ONELAKE_LOG_INFO(&context, "[drop_table] Dropped Unity Catalog entry: %s", info.name.c_str());
+	} catch (std::exception &ex) {
+		// Don't fail the DROP if catalog cleanup fails; the storage was already removed.
+		ONELAKE_LOG_WARN(&context, "[drop_table] Unity Catalog cleanup failed for %s: %s", info.name.c_str(),
+		                 ex.what());
+	}
+	auto t_end_catalog = std::chrono::high_resolution_clock::now();
+	double catalog_secs = std::chrono::duration<double>(t_end_catalog - t_start_catalog).count();
+	ONELAKE_LOG_INFO(&context, "[drop_table] Catalog delete time: %.3fs", catalog_secs);
+
+	// TODO: If table is partitioned or has many files, consider bulk/parallel delete for storage for further speedup.
+
+	// Remove from catalog cache
+	EraseEntryInternal(info.name);
+
+	ONELAKE_LOG_INFO(&context, "[drop_table] Dropped table successfully: %s", info.name.c_str());
 }
 
 } // namespace duckdb

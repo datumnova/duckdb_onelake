@@ -26,6 +26,15 @@ public:
 	const vector<string> &GetPartitionColumns() const {
 		return partition_columns;
 	}
+	void SetCreateMetadata(unique_ptr<OneLakeCreateTableMetadata> metadata);
+	OneLakeCreateTableMetadata *GetCreateMetadata();
+	const OneLakeCreateTableMetadata *GetCreateMetadata() const;
+
+	//! Ensure the table's column definitions have been materialized by binding the underlying table function.
+	bool EnsureColumnDefinitions(ClientContext &context);
+
+	string GetCachedResolvedPath() const;
+	void RememberResolvedPath(const string &path);
 
 private:
 	void UpdateColumnDefinitions(const vector<string> &names, const vector<LogicalType> &types);
@@ -36,6 +45,7 @@ private:
 	vector<string> partition_columns;
 	string resolved_path;
 	bool details_loaded = false;
+	unique_ptr<OneLakeCreateTableMetadata> create_metadata;
 };
 
 } // namespace duckdb

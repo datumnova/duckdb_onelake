@@ -1,0 +1,27 @@
+diff --git a/sdk/core/azure-core/src/http/curl/curl.cpp b/sdk/core/azure-core/src/http/curl/curl.cpp
+index 0bb61ba6f3..f647b9caa2 100644
+--- a/sdk/core/azure-core/src/http/curl/curl.cpp
++++ b/sdk/core/azure-core/src/http/curl/curl.cpp
+@@
+ void WinSocketSetBuffSize(curl_socket_t socket)
+ {
++#if defined(SIO_IDEAL_SEND_BACKLOG_QUERY)
+   ULONG ideal{};
+   DWORD ideallen{};
+   // WSAloctl would get the ideal size for the socket buffer.
+   if (WSAIoctl(socket, SIO_IDEAL_SEND_BACKLOG_QUERY, 0, 0, &ideal, sizeof(ideal), &ideallen, 0, 0)
+       == 0)
+   {
+     // if WSAloctl succeeded (returned 0), set the socket buffer size.
+     // Specifies the total per-socket buffer space reserved for sends.
+     // https://learn.microsoft.com/windows/win32/api/winsock/nf-winsock-setsockopt
+     setsockopt(socket, SOL_SOCKET, SO_SNDBUF, (const char*)&ideal, sizeof(ideal));
+   }
++#else
++  // MinGW targets built with win32 headers before Windows 8 do not expose the
++  // backlog ioctl, so skip the optimization instead of failing to compile.
++  (void)socket;
++#endif
+ }
+ #endif
+*** End Patch

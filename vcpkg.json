@@ -4,15 +4,18 @@
     "openssl",
     "curl",
     "jsoncpp",
+    "bzip2",
     "azure-identity-cpp",
     {
       "name": "azure-core-cpp",
+      "default-features": false,
       "features": ["curl"]
     }
   ],
   "vcpkg-configuration": {
     "overlay-ports": [
-      "./extension-ci-tools/vcpkg_ports"
+      "./extension-ci-tools/vcpkg_ports",
+      "./vcpkg_overlays"
     ],
     "overlay-triplets": [
       "./extension-ci-tools/toolchains"

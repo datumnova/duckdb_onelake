@@ -6,6 +6,7 @@
 - [Authentication System](#authentication-system)
 - [Database Attachment Process](#database-attachment-process)
 - [Table Discovery and Selection](#table-discovery-and-selection)
+- [Delta Write Pipeline](#delta-write-pipeline)
 - [Apache Iceberg Support](#apache-iceberg-support)
 - [Code Reference](#code-reference)
 - [API Integration](#api-integration)
@@ -13,16 +14,17 @@
 
 ## Overview
 
-The DuckDB OneLake extension enables seamless integration between DuckDB and Microsoft Fabric's OneLake, allowing users to query both Delta Lake and Apache Iceberg tables stored in OneLake lakehouses directly from DuckDB. This extension provides a read-only interface to OneLake data, leveraging DuckDB's powerful SQL capabilities while maintaining secure authentication through Azure Active Directory.
+The DuckDB OneLake extension enables seamless integration between DuckDB and Microsoft Fabric's OneLake, allowing users to query both Delta Lake and Apache Iceberg tables stored in OneLake lakehouses directly from DuckDB. In addition to querying, the extension now supports **append-only INSERT statements into existing Delta tables**, leveraging DuckDB's powerful SQL capabilities while maintaining secure authentication through Azure Active Directory.
 
 ### Key Features
 
-- **Multiple Authentication Methods**: Service Principal credentials, Azure CLI authentication, and credential chains
-- **Workspace and Lakehouse Management**: Connect to multiple workspaces and lakehouses within a single DuckDB session  
-- **Multi-Format Support**: Native integration with both Delta Lake and Apache Iceberg formats
-- **Schema Discovery**: Automatic discovery of lakehouses  and tables within workspaces
-- **Advanced Query Syntax**: Support for explicit format specification with `USING ICEBERG` syntax
-- **Secure Access**: Full integration with Azure Active Directory for secure data access
+- **Multiple Authentication Methods**: Service Principal credentials, Azure CLI authentication, credential chains, and env-token bootstrapping.
+- **Workspace and Lakehouse Management**: Connect to multiple workspaces and lakehouses within a single DuckDB session.  
+- **Multi-Format Support**: Native integration with both Delta Lake and Apache Iceberg formats (Iceberg is read-only today).
+- **Schema Discovery**: Automatic discovery of lakehouses and tables within workspaces with lazy column hydration.
+- **Advanced Query Syntax**: Support for explicit format specification with `USING ICEBERG` syntax.
+- **Secure Access**: Full integration with Azure Active Directory for secure data access.
+- **Delta DML Support**: `INSERT`, physical `CREATE TABLE`, `DROP TABLE`, `DELETE`, and `UPDATE` statements backed by the bundled Rust writer and OneLake storage APIs (no `RETURNING` clauses yet; destructive operations require an opt-in setting).
 
 ## Request Workflow
 
@@ -606,6 +608,114 @@ graph TB
     T5 --> DT5
 ```
 
+## Delta Write Pipeline
+
+The write subsystem now covers `INSERT`, `CREATE TABLE`, `DROP TABLE`, `DELETE`, and `UPDATE`. This section summarizes
+the main flows and the knobs that govern them.
+
+### INSERT and write-mode settings
+
+`INSERT` reuse DuckDB's planning pipeline with a bespoke `PhysicalOneLakeInsert` operator that batches rows and hands
+them to the Rust `deltalake` writer:
+
+1. **Planner hook** – Tables bound inside a OneLake catalog swap `PhysicalInsert` for `PhysicalOneLakeInsert` without
+        changing the logical children, so complex `INSERT ... SELECT` pipelines still run inside DuckDB.
+2. **Buffering** – Each thread appends incoming chunks into a shared `ColumnDataCollection`, preserving column names
+        captured during catalog load so the Arrow schema matches the Delta table exactly.
+3. **Finalize** – `PhysicalOneLakeInsert::Finalize` resolves the ABFSS URI, serializes partition columns, and packages
+        credentials plus options JSON (write mode, schema mode, safe-cast preferences, file/batch hints).
+4. **Rust hand-off** – `OneLakeDeltaWriter::Append` wraps the buffered data in an `ArrowArrayStream` and calls
+        `ol_delta_append`. The Rust crate registers Azure handlers, opens the table via `DeltaOps`, and streams the batches.
+5. **Row count output** – The operator emits a single row containing the number of inserted tuples so shells and
+        parameterized clients can observe write cardinality.
+
+Configuration settings:
+
+- `onelake_insert_mode = append|overwrite|error_if_exists|ignore`
+- `onelake_schema_mode = merge|overwrite`
+- `onelake_safe_cast = true|false`
+- `onelake_target_file_size` (`BIGINT` bytes) and `onelake_write_batch_size` (rows) for performance tuning
+
+#### Reference SQL examples (current feature set)
+
+```sql
+-- Create a Delta table that materializes immediately with partition metadata
+CREATE TABLE finance.daily_balances (
+    account_id BIGINT,
+    region VARCHAR,
+    as_of_date DATE,
+    balance DECIMAL(18,2)
+) PARTITION BY (region, as_of_date)
+WITH (
+    description = 'Daily regional balances'
+);
+
+-- Append or overwrite data with explicit write-mode controls
+SET onelake_insert_mode = 'append';
+SET onelake_schema_mode = 'merge';
+INSERT INTO finance.daily_balances
+SELECT account_id, region, as_of_date, balance FROM staging_balances;
+
+-- Update rows (requires destructive-operation opt-in)
+SET onelake_allow_destructive_operations = true;
+UPDATE finance.daily_balances
+SET balance = balance * 1.02
+WHERE region = 'EMEA' AND as_of_date = DATE '2025-11-28';
+
+-- Delete rows that fall outside your retention window
+SET onelake_allow_destructive_operations = true;
+DELETE FROM finance.daily_balances
+WHERE as_of_date < DATE '2025-01-01';
+
+-- Drop a table when the catalog entry should be removed
+SET onelake_allow_destructive_operations = true;
+DROP TABLE IF EXISTS finance.archived_balances;
+```
+
+All destructive statements (`UPDATE`, `DELETE`, `DROP TABLE`) require the session-scoped
+`onelake_allow_destructive_operations` flag. Partition columns specified via `PARTITION BY (...)` (or by manually
+setting `onelake_partition_columns`) are persisted directly into the Delta metadata so downstream systems see the same
+layout.
+
+### CREATE TABLE (Phase 2)
+
+`CREATE TABLE ...` now has two responsibilities:
+
+1. Record the catalog metadata via `OneLakeTableSet::CreateTable`, just like standard DuckDB schemas.
+2. Call into the Rust writer (`OneLakeDeltaWriter::CreateTable`) to materialize a Delta table under
+     `abfss://<workspace>@onelake.dfs.fabric.microsoft.com/<lakehouse_id>/Tables/<table>/` (or an explicit location tag).
+
+Partition columns are derived from tags, comments, or the `onelake_partition_columns` session setting and serialized
+into the options payload passed to Rust.
+
+### DROP TABLE, DELETE, UPDATE (Phases 3-5)
+
+- **Safety toggle** – All destructive operations obey `onelake_allow_destructive_operations`, which defaults to
+    `false`. Users must `SET onelake_allow_destructive_operations = true;` per session before running `DROP TABLE`,
+    `DELETE`, or `UPDATE`.
+- **DROP TABLE** – `PhysicalOneLakeDrop` removes the catalog entry and calls into the Rust bridge to delete Delta
+    metadata in the catalog, but it currently **does not delete** the physical folders or `_delta_log` directories in the
+    OneLake lakehouse. Operators should clean up storage via Fabric tooling if needed.
+- **DELETE** – `PhysicalOneLakeDelete` captures the predicate, serializes it into Delta SQL, and invokes a Rust FFI
+    method that issues a Delta delete command. The operator returns the count of deleted rows. `RETURNING` is not yet
+    supported.
+- **UPDATE** – `PhysicalOneLakeUpdate` captures the `SET` clause and WHERE predicate, serializes them into JSON, and
+    reuses the Rust bridge to perform the read-modify-write cycle. Only non-returning updates are supported today.
+
+### Payloads passed to the writer
+
+- **Table URI** – An ABFSS location such as
+    `abfss://workspace@onelake.dfs.fabric.microsoft.com/lakehouse.Lakehouse/Tables/people`.
+- **Token JSON** – `{ "storageToken": "<dfs_scope_token>" }`, reused by `httpfs` and the Rust writer.
+- **Options JSON** – `{ "mode": "append", "schemaMode": "merge", "partitionColumns": [ ... ] }`, plus
+    operation-specific keys (`predicate`, `assignments`, etc.).
+
+### Operational notes
+
+- Only Delta tables are writable today; Iceberg remains read-only.
+- MERGE/UPSERT and ALTER TABLE flows are still under development.
+- If table schemas change externally, re-run `ATTACH` (or `DETACH/ATTACH`) to refresh column metadata before writing.
+
 ## Apache Iceberg Support
 
 The OneLake extension provides comprehensive support for Apache Iceberg tables alongside traditional Delta Lake tables. This enables users to query Iceberg tables stored in OneLake lakehouses using either automatic format detection or explicit syntax.
@@ -1096,29 +1206,26 @@ The Iceberg integration prioritizes native ABFS paths for better compatibility w
 
 ### Current Limitations
 
-1. **Read-Only Access**: The extension currently only supports SELECT operations
-   - No INSERT, UPDATE, DELETE, or CREATE TABLE support
-   - Implementation in `OneLakeCatalog` throws `NotImplementedException` for these operations
+1. **Delta-only writes**: All DML (`INSERT`, `CREATE TABLE`, `DROP TABLE`, `DELETE`, `UPDATE`) targets Delta tables. Iceberg remains read-only.
+2. **Destructive operations**: `DROP TABLE` currently removes only the DuckDB catalog entry. It does **not** delete the underlying directories or `_delta_log` files inside the OneLake lakehouse, even when those folders are empty.
+3. **Schema-enabled lakehouses**: Attach attempts still fail because the Fabric API does not expose a stable contract yet (see the [public preview limitations](https://learn.microsoft.com/en-us/fabric/data-engineering/lakehouse-schemas#public-preview-limitations)).
+4. **Feature gaps**: MERGE/UPSERT, ALTER TABLE (add/drop column), and `RETURNING` clauses for DELETE/UPDATE are planned but not implemented.
+5. **Limited metadata**: Some table-level statistics (row counts, data sizes) are unavailable through the current APIs.
 
-2. **Schema-Enabled Lakehouses**: Currently incompatible due to Fabric API limitations
-   - See: [Lakehouse Schemas Public Preview Limitations](https://learn.microsoft.com/en-us/fabric/data-engineering/lakehouse-schemas#public-preview-limitations)
+---
 
-3. **Limited Format Support**: Currently supports Delta Lake and Apache Iceberg
-   - Parquet and other formats not directly supported
-   - Relies on DuckDB's delta and iceberg extensions for format handling
+#### DELETE/UPDATE Troubleshooting
 
-4. **Limited Metadata**: Some table metadata may not be available through current APIs
-   - Table size, row counts, and statistics may be incomplete
+- Always set `SET onelake_allow_destructive_operations = true;` before running DELETE, UPDATE, or DROP TABLE.
+- `RETURNING` clauses are not yet supported. If DuckDB reports "operator not supported" or similar planner errors, remove `RETURNING` and rerun the statement.
+- Ensure you are on the latest build: the physical operators avoid child scans, so outdated binaries may still reference removed planner paths.
+- If failures persist, capture the DuckDB `EXPLAIN` plan plus the extension logs and share them with the maintainers.
 
 ### Future Enhancements
 
-#### Write Operations Support
-```sql
--- Potential future functionality
-INSERT INTO onelake.lakehouse.table SELECT * FROM local_table;
-CREATE TABLE onelake.lakehouse.new_table AS SELECT * FROM source;
-UPDATE onelake.lakehouse.table SET column = value WHERE condition;
-```
+#### Extended Write Operations
+- Support for Iceberg inserts, CTAS, and overwrite modes
+- Declarative MERGE/UPDATE/DELETE once the Fabric APIs and storage semantics are available
 
 #### Enhanced Authentication
 - Managed Identity support for Azure-hosted environments

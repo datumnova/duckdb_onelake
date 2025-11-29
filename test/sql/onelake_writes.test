@@ -1,0 +1,262 @@
+# name: test/sql/onelake_writes.test
+# description: Test OneLake write operations (INSERT, UPDATE, DELETE, MERGE)
+# group: [sql]
+
+require onelake
+
+# Note: These tests require a live OneLake connection with appropriate credentials
+# Set environment variables: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET
+# Set test environment: TEST_WORKSPACE, TEST_LAKEHOUSE
+
+# Skip tests if environment not configured
+mode skip
+
+statement ok
+INSTALL azure;
+
+statement ok
+LOAD azure;
+
+# Setup authentication
+statement ok
+CREATE SECRET azure_test (
+    TYPE azure,
+    PROVIDER service_principal,
+    TENANT_ID '${AZURE_TENANT_ID}',
+    CLIENT_ID '${AZURE_CLIENT_ID}',
+    CLIENT_SECRET '${AZURE_CLIENT_SECRET}'
+);
+
+statement ok
+CREATE SECRET onelake_test (
+    TYPE ONELAKE,
+    TENANT_ID '${AZURE_TENANT_ID}',
+    CLIENT_ID '${AZURE_CLIENT_ID}',
+    CLIENT_SECRET '${AZURE_CLIENT_SECRET}'
+);
+
+# Attach test lakehouse
+statement ok
+ATTACH '${TEST_WORKSPACE}/${TEST_LAKEHOUSE}.Lakehouse' 
+    AS test_db (TYPE ONELAKE);
+
+# ============================================================================
+# Phase 0: Basic INSERT Operations (Currently Working)
+# ============================================================================
+
+# Test 1: Simple INSERT with VALUES
+statement ok
+CREATE TABLE IF NOT EXISTS test_db.test_schema.basic_insert_test (
+    id INT,
+    name VARCHAR,
+    created_at TIMESTAMP
+);
+
+statement ok
+INSERT INTO test_db.test_schema.basic_insert_test 
+VALUES 
+    (1, 'Alice', '2025-01-01 10:00:00'),
+    (2, 'Bob', '2025-01-01 11:00:00'),
+    (3, 'Charlie', '2025-01-01 12:00:00');
+
+query III
+SELECT id, name, created_at 
+FROM test_db.test_schema.basic_insert_test 
+ORDER BY id;
+----
+1	Alice	2025-01-01 10:00:00
+2	Bob	2025-01-01 11:00:00
+3	Charlie	2025-01-01 12:00:00
+
+# Test 2: INSERT with SELECT
+statement ok
+CREATE TABLE IF NOT EXISTS test_db.test_schema.insert_select_source (
+    id INT,
+    value DECIMAL(10,2)
+);
+
+statement ok
+INSERT INTO test_db.test_schema.insert_select_source 
+VALUES (10, 100.50), (20, 200.75), (30, 300.25);
+
+statement ok
+CREATE TABLE IF NOT EXISTS test_db.test_schema.insert_select_target (
+    id INT,
+    value DECIMAL(10,2)
+);
+
+statement ok
+INSERT INTO test_db.test_schema.insert_select_target 
+SELECT * FROM test_db.test_schema.insert_select_source WHERE id >= 20;
+
+query IR
+SELECT * FROM test_db.test_schema.insert_select_target ORDER BY id;
+----
+20	200.75
+30	300.25
+
+# Test 3: INSERT with explicit column list
+statement ok
+CREATE TABLE IF NOT EXISTS test_db.test_schema.column_list_test (
+    id INT,
+    name VARCHAR,
+    status VARCHAR,
+    amount DECIMAL(10,2)
+);
+
+statement ok
+INSERT INTO test_db.test_schema.column_list_test (id, name, amount)
+VALUES (1, 'Test1', 99.99), (2, 'Test2', 88.88);
+
+query IVVR
+SELECT * FROM test_db.test_schema.column_list_test ORDER BY id;
+----
+1	Test1	NULL	99.99
+2	Test2	NULL	88.88
+
+# ============================================================================
+# Phase 1: Write Modes (To Be Implemented)
+# ============================================================================
+
+# Test 4: INSERT with OVERWRITE mode (placeholder)
+# TODO: Implement after Phase 1
+statement error
+SET onelake_insert_mode = 'overwrite';
+
+# Test 5: Schema evolution with MERGE mode (placeholder)
+# TODO: Implement after Phase 1
+statement error
+SET onelake_schema_mode = 'merge';
+
+# ============================================================================
+# Phase 2: Physical Table Creation (To Be Implemented)
+# ============================================================================
+
+# Test 6: CREATE TABLE with new Delta table (placeholder)
+# TODO: Currently only creates catalog entry, should create physical table
+# statement ok
+# CREATE TABLE test_db.test_schema.new_physical_table (
+#     id INT PRIMARY KEY,
+#     data VARCHAR,
+#     created_date DATE
+# );
+
+# Test 7: CREATE TABLE with partition columns (placeholder)
+# TODO: Implement after Phase 2
+# statement ok
+# CREATE TABLE test_db.test_schema.partitioned_table (
+#     id INT,
+#     region VARCHAR,
+#     sales DECIMAL(10,2),
+#     date DATE
+# ) WITH (partition_columns = ['region', 'date']);
+
+# Test 8: CREATE TABLE AS SELECT (placeholder)
+# TODO: Implement after Phase 2
+# statement ok
+# CREATE TABLE test_db.test_schema.ctas_table AS 
+# SELECT * FROM test_db.test_schema.basic_insert_test 
+# WHERE id > 1;
+
+# ============================================================================
+# Phase 3: DROP TABLE (To Be Implemented)
+# ============================================================================
+
+# Test 9: DROP TABLE (placeholder)
+# TODO: Implement after Phase 3
+statement error
+DROP TABLE test_db.test_schema.basic_insert_test;
+
+# Test 10: DROP TABLE IF EXISTS (placeholder)
+# TODO: Implement after Phase 3
+statement error
+DROP TABLE IF EXISTS test_db.test_schema.nonexistent_table;
+
+# ============================================================================
+# Phase 4: DELETE Operations (To Be Implemented)
+# ============================================================================
+
+# Test 11: DELETE with WHERE clause (placeholder)
+# TODO: Implement after Phase 4
+statement error
+DELETE FROM test_db.test_schema.basic_insert_test WHERE id = 1;
+
+# Test 12: DELETE without WHERE (truncate) (placeholder)
+# TODO: Implement after Phase 4
+statement error
+DELETE FROM test_db.test_schema.insert_select_target;
+
+# ============================================================================
+# Phase 5: UPDATE Operations (To Be Implemented)
+# ============================================================================
+
+# Test 13: UPDATE with WHERE clause (placeholder)
+# TODO: Implement after Phase 5
+statement error
+UPDATE test_db.test_schema.basic_insert_test 
+SET name = 'Updated Name' 
+WHERE id = 2;
+
+# Test 14: UPDATE with expression (placeholder)
+# TODO: Implement after Phase 5
+statement error
+UPDATE test_db.test_schema.column_list_test 
+SET amount = amount * 1.1 
+WHERE id > 0;
+
+# Test 15: UPDATE multiple columns (placeholder)
+# TODO: Implement after Phase 5
+statement error
+UPDATE test_db.test_schema.basic_insert_test 
+SET name = 'Alice Updated', created_at = NOW() 
+WHERE id = 1;
+
+# ============================================================================
+# Phase 6: MERGE Operations (To Be Implemented)
+# ============================================================================
+
+# Test 16: MERGE with INSERT and UPDATE (placeholder)
+# TODO: Implement after Phase 6
+# statement ok
+# MERGE INTO test_db.test_schema.target_table t
+# USING test_db.test_schema.source_table s
+# ON t.id = s.id
+# WHEN MATCHED THEN UPDATE SET name = s.name, value = s.value
+# WHEN NOT MATCHED THEN INSERT VALUES (s.id, s.name, s.value);
+
+# Test 17: MERGE with DELETE (placeholder)
+# TODO: Implement after Phase 6
+# statement ok
+# MERGE INTO test_db.test_schema.target_table t
+# USING test_db.test_schema.source_table s
+# ON t.id = s.id
+# WHEN MATCHED AND s.deleted = true THEN DELETE
+# WHEN MATCHED THEN UPDATE SET value = s.value;
+
+# ============================================================================
+# Phase 7: ALTER TABLE (To Be Implemented)
+# ============================================================================
+
+# Test 18: ALTER TABLE ADD COLUMN (placeholder)
+# TODO: Implement after Phase 7
+statement error
+ALTER TABLE test_db.test_schema.basic_insert_test ADD COLUMN email VARCHAR;
+
+# Test 19: ALTER TABLE DROP COLUMN (placeholder)
+# TODO: Implement after Phase 7
+statement error
+ALTER TABLE test_db.test_schema.basic_insert_test DROP COLUMN created_at;
+
+# Test 20: ALTER TABLE RENAME COLUMN (placeholder)
+# TODO: Implement after Phase 7
+statement error
+ALTER TABLE test_db.test_schema.basic_insert_test RENAME COLUMN name TO full_name;
+
+# ============================================================================
+# Cleanup
+# ============================================================================
+
+# Note: Cleanup currently requires manual intervention or Fabric API calls
+# TODO: Automate cleanup after DROP TABLE is implemented
+
+mode unskip

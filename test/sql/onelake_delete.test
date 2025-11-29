@@ -1,0 +1,195 @@
+# name: test/sql/onelake_delete.test
+# description: Test DELETE operations for OneLake extension
+# group: [sql]
+
+# Skip test if no credentials available
+require onelake
+
+# Ensure destructive operations are disabled before running
+statement ok
+SET onelake_allow_destructive_operations = false;
+
+# Create a test table with data
+statement ok
+CREATE TABLE test_delete_basic (id INTEGER, name VARCHAR, value DOUBLE);
+
+statement ok
+INSERT INTO test_delete_basic VALUES (1, 'alice', 10.5), (2, 'bob', 20.0), (3, 'carol', 30.5), (4, 'dave', 40.0);
+
+# Verify initial data
+query I
+SELECT COUNT(*) FROM test_delete_basic;
+----
+4
+
+# Enable destructive operations so DELETE statements can run
+statement ok
+SET onelake_allow_destructive_operations = true;
+
+# Test DELETE with simple WHERE clause (equality)
+statement ok
+DELETE FROM test_delete_basic WHERE id = 1;
+
+# Verify deletion
+query I
+SELECT COUNT(*) FROM test_delete_basic;
+----
+3
+
+query I
+SELECT COUNT(*) FROM test_delete_basic WHERE id = 1;
+----
+0
+
+# Test DELETE with comparison operators
+statement ok
+DELETE FROM test_delete_basic WHERE value > 25.0;
+
+# Should delete carol (30.5) and dave (40.0)
+query I
+SELECT COUNT(*) FROM test_delete_basic;
+----
+1
+
+# Verify only bob remains
+query IT
+SELECT id, name FROM test_delete_basic ORDER BY id;
+----
+2	bob
+
+# Create table for AND/OR tests
+statement ok
+CREATE TABLE test_delete_conditions (id INTEGER, category VARCHAR, score INTEGER);
+
+statement ok
+INSERT INTO test_delete_conditions VALUES 
+  (1, 'A', 10), (2, 'A', 20), (3, 'B', 15), (4, 'B', 25), (5, 'C', 30);
+
+# Test DELETE with AND condition
+statement ok
+DELETE FROM test_delete_conditions WHERE category = 'A' AND score > 15;
+
+# Should delete (2, 'A', 20) only
+query I
+SELECT COUNT(*) FROM test_delete_conditions;
+----
+4
+
+query III
+SELECT * FROM test_delete_conditions WHERE category = 'A' ORDER BY id;
+----
+1	A	10
+
+# Test DELETE with OR condition
+statement ok
+DELETE FROM test_delete_conditions WHERE category = 'B' OR score >= 30;
+
+# Should delete (3, 'B', 15), (4, 'B', 25), (5, 'C', 30)
+query I
+SELECT COUNT(*) FROM test_delete_conditions;
+----
+1
+
+query III
+SELECT * FROM test_delete_conditions ORDER BY id;
+----
+1	A	10
+
+# Test DELETE all rows (no WHERE clause)
+statement ok
+CREATE TABLE test_delete_all (id INTEGER, data VARCHAR);
+
+statement ok
+INSERT INTO test_delete_all VALUES (1, 'a'), (2, 'b'), (3, 'c');
+
+statement ok
+DELETE FROM test_delete_all;
+
+query I
+SELECT COUNT(*) FROM test_delete_all;
+----
+0
+
+# Test DELETE with string comparisons
+statement ok
+CREATE TABLE test_delete_strings (id INTEGER, name VARCHAR);
+
+statement ok
+INSERT INTO test_delete_strings VALUES (1, 'alice'), (2, 'bob'), (3, 'charlie'), (4, 'david');
+
+statement ok
+DELETE FROM test_delete_strings WHERE name = 'bob';
+
+query I
+SELECT COUNT(*) FROM test_delete_strings WHERE name = 'bob';
+----
+0
+
+query I
+SELECT COUNT(*) FROM test_delete_strings;
+----
+3
+
+# Test DELETE with <=, >= operators
+statement ok
+CREATE TABLE test_delete_range (id INTEGER, value INTEGER);
+
+statement ok
+INSERT INTO test_delete_range VALUES (1, 10), (2, 20), (3, 30), (4, 40), (5, 50);
+
+statement ok
+DELETE FROM test_delete_range WHERE value >= 20 AND value <= 40;
+
+# Should keep only 10 and 50
+query I
+SELECT COUNT(*) FROM test_delete_range;
+----
+2
+
+query II
+SELECT * FROM test_delete_range ORDER BY id;
+----
+1	10
+5	50
+
+# Test DELETE with != operator
+statement ok
+CREATE TABLE test_delete_not_equal (id INTEGER, status VARCHAR);
+
+statement ok
+INSERT INTO test_delete_not_equal VALUES (1, 'active'), (2, 'inactive'), (3, 'active'), (4, 'pending');
+
+statement ok
+DELETE FROM test_delete_not_equal WHERE status != 'active';
+
+query I
+SELECT COUNT(*) FROM test_delete_not_equal;
+----
+2
+
+query II
+SELECT * FROM test_delete_not_equal ORDER BY id;
+----
+1	active
+3	active
+
+# Test DELETE returns count of deleted rows
+statement ok
+CREATE TABLE test_delete_count (id INTEGER);
+
+statement ok
+INSERT INTO test_delete_count VALUES (1), (2), (3), (4), (5);
+
+query I
+DELETE FROM test_delete_count WHERE id <= 3;
+----
+3
+
+query I
+SELECT COUNT(*) FROM test_delete_count;
+----
+2
+
+# Cleanup - disable destructive operations
+statement ok
+SET onelake_allow_destructive_operations = false;
