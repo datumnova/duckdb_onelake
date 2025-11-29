@@ -166,6 +166,11 @@ target_include_directories(
   ${TARGET_NAME}_loadable_extension
   PRIVATE OpenSSL::SSL OpenSSL::Crypto CURL::libcurl JsonCpp::JsonCpp Azure::azure-identity ${RUST_BUILD_DIR}/include)
 
+if(WIN32)
+  target_link_libraries(${EXTENSION_NAME} Userenv Ntdll)
+  target_link_libraries(${TARGET_NAME}_loadable_extension Userenv Ntdll)
+endif()
+
 # Allow duplicate constexpr static symbols from catalog entry headers
 if(NOT APPLE AND NOT WIN32)
   target_link_options(${TARGET_NAME}_loadable_extension PRIVATE "LINKER:--allow-multiple-definition")
